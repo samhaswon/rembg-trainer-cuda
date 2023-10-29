@@ -1,6 +1,7 @@
 import os
 import glob
 import torch
+import argparse
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -13,6 +14,35 @@ from data_loader import (
 )
 
 bce_loss = nn.BCELoss(reduction="mean")
+
+
+def get_args():
+    parser = argparse.ArgumentParser(
+        description="A program that trains ONNX model for use with rembg"
+    )
+
+    parser.add_argument(
+        "--tra_image_dir",
+        type=str,
+        default="images",
+        help="Directory with images.",
+    )
+    parser.add_argument(
+        "--tra_label_dir",
+        type=str,
+        default="masks",
+        help="Directory with masks.",
+    )
+    parser.add_argument("--epoch_num", type=int, default=200, help="Number of epochs.")
+    parser.add_argument("--save_frq", type=int, default=300, help="Frequency to save.")
+    parser.add_argument(
+        "--batch",
+        type=int,
+        default=20,
+        help="Single batch size. Warning: affects VRAM usage! Set to VRAM GBs minus one.",
+    )
+
+    return parser.parse_args()
 
 
 def get_device():
@@ -65,7 +95,7 @@ def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
         return 0
 
 
-def load_dataset(img_dir, lbl_dir, ext=".png"):
+def load_dataset(img_dir, lbl_dir, ext):
     img_list = glob.glob(os.path.join(img_dir, "*" + ext))
     lbl_list = [os.path.join(lbl_dir, os.path.basename(img)) for img in img_list]
 
@@ -139,20 +169,17 @@ def train_model(net, optimizer, dataloader, device, epoch_num, save_frq):
 
 
 def main():
+    args = get_args()
     device = get_device()
 
-    # Directories and model specifications
-    tra_image_dir = "images"
-    tra_label_dir = "masks"
-    image_ext = ".png"
-    epoch_num = 200
-    save_frq = 300
-    batch = (
-        20  # Affects VRAM usage! 20 uses ~20+ gb of VRAM. Reduce to suit your hardware.
-    )
+    tra_image_dir = args.tra_image_dir
+    tra_label_dir = args.tra_label_dir
+    epoch_num = args.epoch_num
+    save_frq = args.save_frq
+    batch = args.batch
 
     tra_img_name_list, tra_lbl_name_list = load_dataset(
-        tra_image_dir, tra_label_dir, image_ext
+        tra_image_dir, tra_label_dir, ".png"
     )
 
     print(
