@@ -175,7 +175,7 @@ def train_model(net, optimizer, dataloader, device, epoch_num, save_frq, check_f
                 )  # in ONNX format! ^_^ UwU
 
         # Saves checkpoint every check_frq iterations or during the last one
-        if epoch + 1 % check_frq == 0 or epoch + 1 == epoch_num:
+        if (epoch + 1) % check_frq == 0 or epoch + 1 == epoch_num:
             save_checkpoint(
                 {
                     "iteration_count": iteration_count,
