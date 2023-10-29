@@ -57,11 +57,11 @@ def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
         net.load_state_dict(checkpoint["state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         print(
-            f"Loading checkpoint '{filename}' (trained for {iteration_count} iterations)"
+            f"Loading checkpoint '{filename}'… (trained for {iteration_count} iterations)"
         )
         return iteration_count
     else:
-        print(f"No checkpoint found at '{filename}'")
+        print(f"No checkpoint found at '{filename}'. Starting from scratch…")
         return 0
 
 
@@ -79,6 +79,7 @@ def muti_bce_loss_fusion(d_list, labels_v):
 
 
 def train_model(net, optimizer, dataloader, device, epoch_num, save_frq):
+    print("---\n")
     iteration_count = load_checkpoint(net, optimizer)
     cumulative_loss = 0.0
     epoch_loss = 0.0
@@ -105,7 +106,7 @@ def train_model(net, optimizer, dataloader, device, epoch_num, save_frq):
             print(
                 f"Epoch: {epoch + 1}/{epoch_num}, Iteration: {iteration_count}/{len(dataloader)*(epoch+1)}\n"
                 f"Loss per epoch: {epoch_loss / iteration_count}, "
-                f"Loss per run: {cumulative_loss / iteration_count}, "
+                f"loss per run: {cumulative_loss / iteration_count}\n"
             )
 
             # Saves model every save_frq iterations
@@ -117,7 +118,7 @@ def train_model(net, optimizer, dataloader, device, epoch_num, save_frq):
 
             if iteration_count % len(dataloader) == 0:
                 if epoch + 1 < epoch_num:
-                    print("Checkpoint saved. Loading next crops...")
+                    print("Checkpoint saved. Loading next crops…")
                 else:
                     print("Final checkpoint")
 
@@ -154,7 +155,9 @@ def main():
         tra_image_dir, tra_label_dir, image_ext
     )
 
-    print("Images: ", len(tra_img_name_list), ", Masks: ", len(tra_lbl_name_list))
+    print(
+        "Images: {},".format(len(tra_img_name_list)), "masks:", len(tra_lbl_name_list)
+    )
 
     if len(tra_img_name_list) != len(tra_lbl_name_list):
         print("Different amounts of images and masks, can't proceed mate")
@@ -181,8 +184,6 @@ def main():
     )
 
     # Training loop
-    print("Launching...")
-    print("---")
     train_model(net, optimizer, salobj_dataloader, device, epoch_num, save_frq)
 
 

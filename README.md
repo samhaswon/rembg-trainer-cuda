@@ -13,7 +13,7 @@ If the training is interrupted for any reason, don't worry — the program saves
 - Clone this repo
 - Install `requirements.txt`
 - Put your images into `images` folder
-- Put your masks into `masks` folder; or see [below](#mask-generation)
+- Put your masks into `masks` folder; or see [below](#mask-extraction)
 - Tinker with the settings of `u2net_train.py` and then give it a whirl.
 - Go grab yourself a [nice latte](https://www.youtube.com/shorts/h75W1uhL-iQ) and wait........... and wait.....
 - Once you've had your fill of waiting, here's how you use resulting model with rembg:
