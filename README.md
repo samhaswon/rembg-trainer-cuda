@@ -1,8 +1,8 @@
 # rembg trainer
 
-This code allows you to easily train [U2Net](https://github.com/xuebinqin/U-2-Net) model in [ONNX](https://github.com/onnx/onnx) format to use with [rembg](https://github.com/danielgatis/rembg]) tool
+This code allows you to easily train U2-Net model in [ONNX](https://github.com/onnx/onnx) format to use with [rembg](https://github.com/danielgatis/rembg]) tool
 
-This work is based off U2Net repo, which is under Apache loicence. The derivative work is licenced under MIT; do whatever you want with it.
+This work is based off [U2Net](https://github.com/xuebinqin/U-2-Net) repo, which is under Apache loicence. The derivative work is licenced under MIT; do whatever you want with it.
 
 Default parameters are optimized for systems with 32gb of memory, like Apple M1 Pro. Model is saved every 300 iterations. Adjust as necessary.
 
