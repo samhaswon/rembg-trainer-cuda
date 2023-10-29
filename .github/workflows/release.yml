@@ -21,12 +21,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Any build or test steps go here...
-      # For example, if you want to run tests before creating a release, add them here.
-
       - name: Create Release Zip
         run: |
-          zip -r release.zip .
+          zip -r release.zip . -x .github/\* \*.gitignore
 
       - name: Create Release
         id: create_release
