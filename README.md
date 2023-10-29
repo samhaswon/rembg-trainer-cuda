@@ -13,7 +13,6 @@ How to use:
 - Put your masks into folder “masks”; or see below
 - Adjust parameters of u2net_train.py and then execute it
   - TODO: ability to continue off where you've finished last time
-  - TODO: fix warning related to rescale
 - Go grab yourself a [nice latte](https://www.youtube.com/shorts/h75W1uhL-iQ) and wait........... and wait.....
 - After you've done waiting, run rembg like this:
 

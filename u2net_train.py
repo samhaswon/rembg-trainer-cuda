@@ -59,10 +59,11 @@ def main():
     tra_label_dir = "masks"
     image_ext = ".png"
     label_ext = ".png"
-    epoch_num = 20
+    epoch_num = 50
     save_frq = 300
-    batch = 20  # Affects VRAM usage! 20 uses ~20+ gb of VRAM.
-    # Reduce to suit your hardware (=> increase number of epoches accordingly)
+    batch = (
+        20  # Affects VRAM usage! 20 uses ~20+ gb of VRAM. Reduce to suit your hardware.
+    )
 
     tra_img_name_list = glob.glob(os.path.join(tra_image_dir, "*" + image_ext))
 
