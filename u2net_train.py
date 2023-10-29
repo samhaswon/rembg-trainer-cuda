@@ -147,9 +147,9 @@ def train_model(net, optimizer, dataloader, device, epoch_num, save_frq):
 
             if iteration_count % len(dataloader) == 0:
                 if epoch + 1 < epoch_num:
-                    print("Checkpoint saved. Loading next crops…")
+                    print("Checkpoint saved. Loading next crops…\n")
                 else:
-                    print("Final checkpoint")
+                    print("Final checkpoint\n")
 
         save_checkpoint(
             {
