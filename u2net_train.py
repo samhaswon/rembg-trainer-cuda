@@ -1,7 +1,8 @@
 import os
 import glob
-import torch
 import argparse
+import time
+import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -22,24 +23,42 @@ def get_args():
     )
 
     parser.add_argument(
+        "-i",
         "--tra_image_dir",
         type=str,
         default="images",
         help="Directory with images.",
     )
     parser.add_argument(
+        "-l",
         "--tra_label_dir",
         type=str,
         default="masks",
         help="Directory with masks.",
     )
-    parser.add_argument("--epoch_num", type=int, default=200, help="Number of epochs.")
-    parser.add_argument("--save_frq", type=int, default=300, help="Frequency to save.")
     parser.add_argument(
+        "-e", "--epoch_num", type=int, default=200, help="Number of epochs."
+    )
+    parser.add_argument(
+        "-s",
+        "--save_frq",
+        type=int,
+        default=500,
+        help="Frequency of saving onnx model (every X iterations).",
+    )
+    parser.add_argument(
+        "-c",
+        "--check_frq",
+        type=int,
+        default=5,
+        help="Frequency of saving checkpoints (every X epochs).",
+    )
+    parser.add_argument(
+        "-b",
         "--batch",
         type=int,
         default=25,
-        help="Single batch size. Warning: affects VRAM usage! Set to VRAM GBs minus one.",
+        help="Size of a single batch. Warning: affects VRAM usage! Set to amount of VRAM in gigabytes - 20%%.",
     )
 
     return parser.parse_args()
@@ -47,7 +66,7 @@ def get_args():
 
 def get_device():
     if torch.cuda.is_available():
-        print("CUDA acceleration enabled")
+        print("NVIDIA CUDA acceleration enabled")
         return torch.device("cuda:0")
     elif torch.backends.mps.is_available():
         print("Apple Metal Performance Shaders acceleration enabled")
@@ -108,7 +127,7 @@ def muti_bce_loss_fusion(d_list, labels_v):
     return losses[0], total_loss
 
 
-def train_model(net, optimizer, dataloader, device, epoch_num, save_frq):
+def train_model(net, optimizer, dataloader, device, epoch_num, save_frq, check_frq):
     iteration_count = load_checkpoint(net, optimizer)
     cumulative_loss = 0.0
     epoch_loss = 0.0
@@ -119,6 +138,7 @@ def train_model(net, optimizer, dataloader, device, epoch_num, save_frq):
 
         for i, data in enumerate(dataloader):
             iteration_count += 1
+            start_time = time.time()
 
             inputs = data["image"].to(device).float()
             labels = data["label"].to(device).float()
@@ -132,6 +152,8 @@ def train_model(net, optimizer, dataloader, device, epoch_num, save_frq):
 
             epoch_loss += combined_loss.item()
             cumulative_loss += combined_loss.item()
+            end_time = time.time()
+            elapsed_time = end_time - start_time
 
             print(
                 f"Epoch: {epoch + 1}/{epoch_num}, Iteration: {iteration_count}/{len(dataloader)*(epoch+1)}\n"
@@ -139,28 +161,34 @@ def train_model(net, optimizer, dataloader, device, epoch_num, save_frq):
                 f"loss per run: {cumulative_loss / iteration_count}\n"
             )
 
-            # Saves model every save_frq iterations
-            if iteration_count % save_frq == 0:
+            if iteration_count == 3:
+                print(
+                    f"Expected performance is {elapsed_time:.2f} per {len(dataloader)} crops.\n"
+                )
+
+            # Saves model every save_frq iterations or during the last one
+            if iteration_count % save_frq == 0 or (
+                epoch + 1 == epoch_num and iteration_count == len(dataloader)
+            ):
                 save_model_as_onnx(
                     net, device, iteration_count
                 )  # in ONNX format! ^_^ UwU
 
-        save_checkpoint(
-            {
-                "iteration_count": iteration_count,
-                "state_dict": net.state_dict(),
-                "optimizer": optimizer.state_dict(),
-            }
-        )
-        if epoch + 1 < epoch_num:
-            print("Checkpoint saved. Loading next crops…\n")
-        else:
-            print("Final checkpoint\n")
+        # Saves checkpoint every check_frq iterations or during the last one
+        if epoch + 1 % check_frq == 0 or epoch + 1 == epoch_num:
+            save_checkpoint(
+                {
+                    "iteration_count": iteration_count,
+                    "state_dict": net.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                }
+            )
+            if epoch + 1 < epoch_num:
+                print("Checkpoint saved. Loading next crops…\n")
+            else:
+                print("Final checkpoint made")
 
         epoch_loss = 0.0
-
-    save_model_as_onnx(net, device, iteration_count)
-    print("Model saved for the last time")
 
     return net
 
@@ -173,6 +201,8 @@ def main():
     tra_label_dir = args.tra_label_dir
     epoch_num = args.epoch_num
     save_frq = args.save_frq
+    check_frq = args.check_frq
+
     batch = args.batch
 
     tra_img_name_list, tra_lbl_name_list = load_dataset(
@@ -198,6 +228,7 @@ def main():
         batch_size=batch,
         shuffle=True,
         num_workers=8,  # also reduce this if you don't have many cores available
+        # or set num_workers = multiprocessing.cpu_count()
     )
 
     net = U2NET(3, 1)
@@ -208,7 +239,9 @@ def main():
     )
 
     # Training loop
-    train_model(net, optimizer, salobj_dataloader, device, epoch_num, save_frq)
+    train_model(
+        net, optimizer, salobj_dataloader, device, epoch_num, save_frq, check_frq
+    )
 
 
 if __name__ == "__main__":
