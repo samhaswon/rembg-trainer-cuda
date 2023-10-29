@@ -109,10 +109,10 @@ def muti_bce_loss_fusion(d_list, labels_v):
 
 
 def train_model(net, optimizer, dataloader, device, epoch_num, save_frq):
-    print("---\n")
     iteration_count = load_checkpoint(net, optimizer)
     cumulative_loss = 0.0
     epoch_loss = 0.0
+    print("---\n")
 
     for epoch in range(int(iteration_count / len(dataloader)), epoch_num):
         net.train()
@@ -144,7 +144,6 @@ def train_model(net, optimizer, dataloader, device, epoch_num, save_frq):
                 save_model_as_onnx(
                     net, device, iteration_count
                 )  # in ONNX format! ^_^ UwU
-                print("Model saved")
 
             if iteration_count % len(dataloader) == 0:
                 if epoch + 1 < epoch_num:
