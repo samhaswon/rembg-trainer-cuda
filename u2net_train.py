@@ -61,7 +61,7 @@ def main():
     label_ext = ".png"
     epoch_num = 20
     save_frq = 300
-    batch = 20  # Affects VRAM usage! 20 uses 20+ gb of VRAM.
+    batch = 20  # Affects VRAM usage! 20 uses ~20+ gb of VRAM.
     # Reduce to suit your hardware (=> increase number of epoches accordingly)
 
     tra_img_name_list = glob.glob(os.path.join(tra_image_dir, "*" + image_ext))
@@ -138,10 +138,13 @@ def main():
 
             # Saves model every save_frq iterations
             if ite_num % save_frq == 0:
-                save_model_as_onnx(net, device, ite_num)  # in ONNX format! ^^
+                save_model_as_onnx(net, device, ite_num)  # in ONNX format! ^_^ UwU
                 print("Model saved")
                 running_loss = 0.0
                 running_tar_loss = 0.0
+
+    save_model_as_onnx(net, device, ite_num)
+    print("Model saved for the last time")
 
 
 if __name__ == "__main__":
