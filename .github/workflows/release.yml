@@ -5,6 +5,9 @@ on:
     tags:
       - "*"
 
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -16,7 +19,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v2
         with:
-          python-version: "3.x"
+          python-version: "3.12"
 
       # Any build or test steps go here...
       # For example, if you want to run tests before creating a release, add them here.
