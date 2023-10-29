@@ -17,10 +17,10 @@ bce_loss = nn.BCELoss(reduction="mean")
 
 def get_device():
     if torch.cuda.is_available():
-        print("CUDA Acceleration enabled")
+        print("CUDA acceleration enabled")
         return torch.device("cuda:0")
     elif torch.backends.mps.is_available():
-        print("Apple M1 acceleration enabled")
+        print("Apple Metal Performance Shaders acceleration enabled")
         return torch.device("mps")
     else:
         print("No GPU acceleration :/")
@@ -46,6 +46,25 @@ def save_model_as_onnx(model, device, ite_num, input_tensor_size=(1, 3, 320, 320
     print("Model saved to:", onnx_file_name)
 
 
+def save_checkpoint(state, filename="saved_models/checkpoint.pth.tar"):
+    torch.save(state, filename)
+
+
+def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
+    if os.path.isfile(filename):
+        checkpoint = torch.load(filename)
+        iteration_count = checkpoint["iteration_count"]
+        net.load_state_dict(checkpoint["state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        print(
+            f"Loading checkpoint '{filename}' (trained for {iteration_count} iterations)"
+        )
+        return iteration_count
+    else:
+        print(f"No checkpoint found at '{filename}'")
+        return 0
+
+
 def load_dataset(img_dir, lbl_dir, ext=".png"):
     img_list = glob.glob(os.path.join(img_dir, "*" + ext))
     lbl_list = [os.path.join(lbl_dir, os.path.basename(img)) for img in img_list]
@@ -60,11 +79,11 @@ def muti_bce_loss_fusion(d_list, labels_v):
 
 
 def train_model(net, optimizer, dataloader, device, epoch_num, save_frq):
-    iteration_count = 0
+    iteration_count = load_checkpoint(net, optimizer)
     cumulative_loss = 0.0
     epoch_loss = 0.0
 
-    for epoch in range(epoch_num):
+    for epoch in range(int(iteration_count / len(dataloader)), epoch_num):
         net.train()
 
         for i, data in enumerate(dataloader):
@@ -84,9 +103,9 @@ def train_model(net, optimizer, dataloader, device, epoch_num, save_frq):
             cumulative_loss += combined_loss.item()
 
             print(
-                f"[Epoch: {epoch + 1}/{epoch_num}, Iteration: {iteration_count}/{len(dataloader)/dataloader.batch_size*(epoch+1)}] "
-                f"Epoch Avg Loss: {epoch_loss / iteration_count}, "
-                f"Cumulative Avg: {cumulative_loss / iteration_count}, "
+                f"Epoch: {epoch + 1}/{epoch_num}, Iteration: {iteration_count}/{len(dataloader)*(epoch+1)}\n"
+                f"Loss per epoch: {epoch_loss / iteration_count}, "
+                f"Loss per run: {cumulative_loss / iteration_count}, "
             )
 
             # Saves model every save_frq iterations
@@ -95,6 +114,20 @@ def train_model(net, optimizer, dataloader, device, epoch_num, save_frq):
                     net, device, iteration_count
                 )  # in ONNX format! ^_^ UwU
                 print("Model saved")
+
+            if iteration_count % len(dataloader) == 0:
+                if epoch + 1 < epoch_num:
+                    print("Checkpoint saved. Loading next crops...")
+                else:
+                    print("Final checkpoint")
+
+        save_checkpoint(
+            {
+                "iteration_count": iteration_count,
+                "state_dict": net.state_dict(),
+                "optimizer": optimizer.state_dict(),
+            }
+        )
 
         epoch_loss = 0.0
 
@@ -121,8 +154,7 @@ def main():
         tra_image_dir, tra_label_dir, image_ext
     )
 
-    print("Images: ", len(tra_img_name_list))
-    print("Masks: ", len(tra_lbl_name_list))
+    print("Images: ", len(tra_img_name_list), ", Masks: ", len(tra_lbl_name_list))
 
     if len(tra_img_name_list) != len(tra_lbl_name_list):
         print("Different amounts of images and masks, can't proceed mate")
@@ -138,7 +170,7 @@ def main():
         salobj_dataset,
         batch_size=batch,
         shuffle=True,
-        num_workers=6,  # also reduce this if you don't have many cores available
+        num_workers=8,  # also reduce this if you don't have many cores available
     )
 
     net = U2NET(3, 1)

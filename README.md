@@ -6,6 +6,8 @@ This work is based off [U2Net](https://github.com/xuebinqin/U-2-Net) repo, which
 
 Default parameters are fine-tuned for systems with 32gb of memory, like the Apple M1 Pro: 20 tensors are loaded in memory per iteration, and model is saved every 300 iterations. Give it all a tweak if you need to.
 
+If the training is interrupted for any reason, don't worry — the program saves its state after each epoch, allowing you to resume from where you left off.
+
 ## Fancy a go?
 
 - Clone this repo
@@ -13,7 +15,6 @@ Default parameters are fine-tuned for systems with 32gb of memory, like the Appl
 - Put your images into `images` folder
 - Put your masks into `masks` folder; or see [below](#mask-generation)
 - Tinker with the settings of `u2net_train.py` and then give it a whirl.
-  - TODO: ability to continue off where you've finished last time
 - Go grab yourself a [nice latte](https://www.youtube.com/shorts/h75W1uhL-iQ) and wait........... and wait.....
 - Once you've had your fill of waiting, here's how you use resulting model with rembg:
 
