@@ -35,3 +35,7 @@ So, at the end of the day, you will have the following folder structure:
 - `images` — source images, will be needed for training
 - `clean` — images with removed background, to extract masks
 - `masks` — required for training, to teach model where the background was
+
+## Leave your mark 👉👈🥺
+
+Buy me ~~a coffee~~ an alcohol-free cider [here](http://buymeacoffee.com/jonathunky)
