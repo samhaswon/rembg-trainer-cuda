@@ -38,7 +38,7 @@ def get_args():
     parser.add_argument(
         "--batch",
         type=int,
-        default=20,
+        default=25,
         help="Single batch size. Warning: affects VRAM usage! Set to VRAM GBs minus one.",
     )
 
@@ -87,11 +87,11 @@ def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
         net.load_state_dict(checkpoint["state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         print(
-            f"Loading checkpoint '{filename}'… (trained for {iteration_count} iterations)"
+            f"Loading checkpoint '{filename}', trained for {iteration_count} iterations..."
         )
         return iteration_count
     else:
-        print(f"No checkpoint found at '{filename}'. Starting from scratch…")
+        print(f"No checkpoint found at '{filename}'. Starting from scratch...")
         return 0
 
 
@@ -145,12 +145,6 @@ def train_model(net, optimizer, dataloader, device, epoch_num, save_frq):
                     net, device, iteration_count
                 )  # in ONNX format! ^_^ UwU
 
-            if iteration_count % len(dataloader) == 0:
-                if epoch + 1 < epoch_num:
-                    print("Checkpoint saved. Loading next crops…\n")
-                else:
-                    print("Final checkpoint\n")
-
         save_checkpoint(
             {
                 "iteration_count": iteration_count,
@@ -158,6 +152,10 @@ def train_model(net, optimizer, dataloader, device, epoch_num, save_frq):
                 "optimizer": optimizer.state_dict(),
             }
         )
+        if epoch + 1 < epoch_num:
+            print("Checkpoint saved. Loading next crops…\n")
+        else:
+            print("Final checkpoint\n")
 
         epoch_loss = 0.0
 
