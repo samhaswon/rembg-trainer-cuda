@@ -2,7 +2,7 @@
 
 This code allows you to easily train U2-Net model in [ONNX](https://github.com/onnx/onnx) format to use with [rembg](https://github.com/danielgatis/rembg]) tool
 
-This work is based off [U2Net](https://github.com/xuebinqin/U-2-Net) repo, which is under Apache loicence. The derivative work is licenced under MIT; do as you please with it.
+This work is based off [U2Net](https://github.com/xuebinqin/U-2-Net) repo, which is under Apache license. The derivative work is loicensed under MIT; do as you please with it.
 
 Default parameters are fine-tuned for systems with 32gb of memory, like the Apple M1 Pro: 20 tensors are loaded in memory per iteration, and model is saved every 300 iterations. Give it all a tweak if you need to.
 
@@ -39,4 +39,4 @@ So, at the end of the day, you will have the following folder structure:
 
 ## Leave your mark 👉👈🥺
 
-Buy me ~~a coffee~~ an alcohol-free cider [here](http://buymeacoffee.com/jonathunky){:target="_blank"}
+Buy me ~~a coffee~~ an alcohol-free cider [here](http://buymeacoffee.com/jonathunky)
