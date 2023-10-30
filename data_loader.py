@@ -1,3 +1,4 @@
+import gc
 import numpy as np
 import torchvision.transforms as transforms
 import torchvision.transforms.functional as TF
@@ -26,11 +27,11 @@ class RandomCrop:
             i, j, h, w = transforms.RandomCrop.get_params(
                 image, output_size=self.output_size
             )
-            cropped_image = TF.crop(image, i, j, h, w)
-            cropped_label = TF.crop(label, i, j, h, w)
+            image = TF.crop(image, i, j, h, w)
+            label = TF.crop(label, i, j, h, w)
 
             # Convert the cropped image to numpy array
-            numpy_img = np.array(cropped_image)
+            numpy_img = np.array(image)
 
             white_pixels = np.sum(numpy_img == 255)
             total_pixels = numpy_img.size
@@ -47,8 +48,7 @@ class RandomCrop:
         save_image(
             tensor_img, os.path.join(save_dir, f"step{RandomCrop.step_count}.png")
         )"""
-
-        return {"image": cropped_image, "label": cropped_label}
+        return {"image": image, "label": label}
 
 
 class HorizontalFlip:
@@ -56,10 +56,10 @@ class HorizontalFlip:
         image, label = sample["image"], sample["label"]
 
         # Apply horizontal flip
-        flipped_image = TF.hflip(image)
-        flipped_label = TF.hflip(label)
+        image = TF.hflip(image)
+        label = TF.hflip(label)
 
-        return {"image": flipped_image, "label": flipped_label}
+        return {"image": image, "label": label}
 
 
 class VerticalFlip:
@@ -67,10 +67,10 @@ class VerticalFlip:
         image, label = sample["image"], sample["label"]
 
         # Apply vertical flip
-        flipped_image = TF.vflip(image)
-        flipped_label = TF.vflip(label)
+        image = TF.vflip(image)
+        label = TF.vflip(label)
 
-        return {"image": flipped_image, "label": flipped_label}
+        return {"image": image, "label": label}
 
 
 class Rotation90:
@@ -78,10 +78,10 @@ class Rotation90:
         image, label = sample["image"], sample["label"]
 
         # Apply 90-degree rotation
-        rotated_image = TF.rotate(image, 90)
-        rotated_label = TF.rotate(label, 90)
+        image = TF.rotate(image, 90)
+        label = TF.rotate(label, 90)
 
-        return {"image": rotated_image, "label": rotated_label}
+        return {"image": image, "label": label}
 
 
 class Rotation270:
@@ -89,10 +89,10 @@ class Rotation270:
         image, label = sample["image"], sample["label"]
 
         # Apply 270-degree rotation
-        rotated_image = TF.rotate(image, 270)
-        rotated_label = TF.rotate(label, 270)
+        image = TF.rotate(image, 270)
+        label = TF.rotate(label, 270)
 
-        return {"image": rotated_image, "label": rotated_label}
+        return {"image": image, "label": label}
 
 
 class Resize:
@@ -103,10 +103,10 @@ class Resize:
         image, label = sample["image"], sample["label"]
 
         # Resize both the image and label
-        resized_image = TF.resize(image, (self.size, self.size))
-        resized_label = TF.resize(label, (self.size, self.size))
+        image = TF.resize(image, (self.size, self.size))
+        label = TF.resize(label, (self.size, self.size))
 
-        return {"image": resized_image, "label": resized_label}
+        return {"image": image, "label": label}
 
 
 class ToTensorLab:
@@ -139,6 +139,9 @@ class SalObjDataset(Dataset):
         # Convert arrays to PIL images for compatibility with existing transforms
         image = Image.fromarray(image_array)
         label = Image.fromarray(label_array)
+
+        del image_array, label_array
+        gc.collect()
 
         # If your images aren't already RGB or grayscale, you can convert them:
         # image = image.convert("RGB")

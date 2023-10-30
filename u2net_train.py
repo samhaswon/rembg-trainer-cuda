@@ -1,4 +1,5 @@
 import os
+import gc
 import glob
 import argparse
 import time
@@ -93,6 +94,7 @@ def save_model_as_onnx(model, device, ite_num, input_tensor_size=(1, 3, 320, 320
         dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
     )
     print("Model saved to:", onnx_file_name, "\n")
+    del x
 
 
 def save_checkpoint(state, filename="saved_models/checkpoint.pth.tar"):
@@ -133,9 +135,13 @@ def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
         transform=transform,
     )
 
+    cores = 8
+    if batch_size == 3:
+        cores = 2  # otherwise fails with 32 gigs 🤯 I'm doing something wrong, probably
+
     # DataLoader for the dataset
     salobj_dataloader = DataLoader(
-        salobj_dataset, batch_size=batch_size, shuffle=True, num_workers=8
+        salobj_dataset, batch_size=batch_size, shuffle=True, num_workers=cores
     )
 
     return salobj_dataloader
@@ -147,7 +153,7 @@ def train_model(net, optimizer, dataloader, device):
     for i, data in enumerate(dataloader):
         inputs = data["image"].to(device)
         labels = data["label"].to(device)
-
+        gc.collect()
         optimizer.zero_grad()
 
         outputs = net(inputs)
@@ -155,6 +161,7 @@ def train_model(net, optimizer, dataloader, device):
         first_output, combined_loss = muti_bce_loss_fusion(outputs, labels)
         combined_loss.backward()
         optimizer.step()
+        optimizer.zero_grad()
 
         epoch_loss += combined_loss.item()
 
