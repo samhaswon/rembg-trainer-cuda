@@ -1,7 +1,5 @@
 # rembg trainer
 
-## Please don't use just yet! Huge improvements are coming.
-
 This code allows you to easily train U2-Net model in [ONNX](https://github.com/onnx/onnx) format to use with [rembg](https://github.com/danielgatis/rembg]) tool.
 
 This work is based off [U2Net](https://github.com/xuebinqin/U-2-Net) repo, which is under Apache license. The derivative work is loicensed under MIT; do as you please with it.
