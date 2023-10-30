@@ -6,6 +6,7 @@ import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from model import U2NET
 from data_loader import *
@@ -14,6 +15,20 @@ SAVE_FRQ = 0
 CHECK_FRQ = 0
 
 bce_loss = nn.BCELoss(reduction="mean")
+
+
+def dice_loss(pred, target, smooth=1.0):
+    pred = pred.contiguous()
+    target = target.contiguous()
+
+    intersection = (pred * target).sum(dim=2).sum(dim=2)
+
+    loss = 1 - (
+        (2.0 * intersection + smooth)
+        / (pred.sum(dim=2).sum(dim=2) + target.sum(dim=2).sum(dim=2) + smooth)
+    )
+
+    return loss.mean()
 
 
 def get_args():
@@ -122,9 +137,14 @@ def load_dataset(img_dir, lbl_dir, ext):
 
 
 def muti_bce_loss_fusion(d_list, labels_v):
-    losses = [bce_loss(d, labels_v) for d in d_list]
-    total_loss = sum(losses)
-    return losses[0], total_loss
+    bce_losses = [bce_loss(d, labels_v) for d in d_list]
+    dice_losses = [dice_loss(d, labels_v) for d in d_list]
+    w_bce, w_dice = 1 / 3, 2 / 3
+    combined_losses = [
+        w_bce * bce + w_dice * dice for bce, dice in zip(bce_losses, dice_losses)
+    ]
+    total_loss = sum(combined_losses)
+    return combined_losses[0], total_loss
 
 
 def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
@@ -147,7 +167,7 @@ def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
     return salobj_dataloader
 
 
-def train_model(net, optimizer, dataloader, device):
+def train_model(net, optimizer, scheduler, dataloader, device):
     epoch_loss = 0.0
 
     for i, data in enumerate(dataloader):
@@ -160,8 +180,12 @@ def train_model(net, optimizer, dataloader, device):
 
         first_output, combined_loss = muti_bce_loss_fusion(outputs, labels)
         combined_loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            net.parameters(), max_norm=1.0
+        )  # Clip gradients if their norm exceeds 1
         optimizer.step()
         optimizer.zero_grad()
+        scheduler.step()
 
         epoch_loss += combined_loss.item()
 
@@ -179,13 +203,13 @@ def train_model(net, optimizer, dataloader, device):
     return epoch_loss
 
 
-def train_epochs(net, optimizer, dataloader, device, epochs):
+def train_epochs(net, optimizer, scheduler, dataloader, device, epochs):
     for epoch in epochs:
         start_time = time.time()
 
         # this is where the training occurs!
         print(f"Epoch: {epoch + 1}/{epochs[-1] + 1}")
-        epoch_loss = train_model(net, optimizer, dataloader, device)
+        epoch_loss = train_model(net, optimizer, scheduler, dataloader, device)
         print(f"Loss per epoch: {epoch_loss}\n")
 
         if epoch == 0:
@@ -248,6 +272,9 @@ def main():
         net.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0
     )
 
+    # Let's say you want the minimum learning rate to be 1e-6
+    scheduler = CosineAnnealingLR(optimizer, T_max=epoch_num, eta_min=1e-6)
+
     start_epoch = load_checkpoint(net, optimizer)
     print("---\n")
 
@@ -256,7 +283,7 @@ def main():
         dataloader = get_dataloader(
             tra_img_name_list, tra_lbl_name_list, transform, batch_size
         )
-        train_epochs(net, optimizer, dataloader, device, epochs)
+        train_epochs(net, optimizer, scheduler, dataloader, device, epochs)
 
     if start_epoch < 3:
         print("Learning the dataset itself...\n")
