@@ -1,15 +1,16 @@
 import os
-import gc
-import glob
 import argparse
+import glob
 import time
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
-from model import U2NET
+
 from data_loader import *
+from model import U2NET
 
 SAVE_FRQ = 0
 CHECK_FRQ = 0

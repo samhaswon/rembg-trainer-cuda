@@ -1,12 +1,11 @@
 import gc
-import os
+
+import imageio
 import numpy as np
 import torchvision.transforms as transforms
 import torchvision.transforms.functional as TF
-from torchvision.utils import save_image
-from torch.utils.data import Dataset
 from PIL import Image
-import imageio
+from torch.utils.data import Dataset
 
 
 class RandomCrop:
@@ -38,8 +37,8 @@ class RandomCrop:
             white_pixels = np.sum(numpy_img == 255)
             total_pixels = numpy_img.size
 
-            if white_pixels / total_pixels <= 0.8:
-                break  # exit the loop if 80% or less of the pixels are white
+            if white_pixels / total_pixels <= 0.95:
+                break  # exit the loop if not more than 95% of the pixels are white
 
         # Save the cropped images
         """save_dir = "steps"
@@ -105,8 +104,8 @@ class Resize:
         image, label = sample["image"], sample["label"]
 
         # Resize both the image and label
-        image = TF.resize(image, (self.size, self.size))
-        label = TF.resize(label, (self.size, self.size))
+        image = TF.resize(image, [self.size, self.size])
+        label = TF.resize(label, [self.size, self.size])
 
         return {"image": image, "label": label}
 
