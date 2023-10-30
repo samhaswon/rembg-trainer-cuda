@@ -108,7 +108,7 @@ def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
         print(f"Loading checkpoint '{filename}', trained for {epoch_count} epochs...")
         return epoch_count
     else:
-        print(f"No checkpoint found at '{filename}'. Starting from scratch...")
+        print(f"No checkpoint file found at '{filename}'. Starting from scratch...")
         return 0
 
 
@@ -158,7 +158,7 @@ def train_model(net, optimizer, dataloader, device):
 
         epoch_loss += combined_loss.item()
 
-        if i < 10:
+        if i < 9:
             print(
                 f"  Iteration:  {i + 1}/{len(dataloader)}, "
                 f"loss per iteration: {epoch_loss / (i + 1)}"
@@ -245,7 +245,9 @@ def main():
 
     def create_and_train(transform, batch_size, epochs):
         """Creates a dataloader and trains the network using the given parameters."""
-        dataloader = get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size)
+        dataloader = get_dataloader(
+            tra_img_name_list, tra_lbl_name_list, transform, batch_size
+        )
         train_epochs(net, optimizer, dataloader, device, epochs)
 
     if start_epoch < 2:
@@ -258,16 +260,18 @@ def main():
     if start_epoch < 3:
         print("Learning the random horizontal flips of dataset images")
         epochs = range(start_epoch, 4)
-        transform = transforms.Compose([HorizontalFlip(),
-                                        Resize((1024, 1024)), ToTensorLab(flag=0)])
+        transform = transforms.Compose(
+            [HorizontalFlip(), Resize((1024)), ToTensorLab(flag=0)]
+        )
         create_and_train(transform, 3, epochs)
         start_epoch = epochs[-1] + 1
 
     if start_epoch < 4:
         print("Learning the random vertical flips of dataset images")
         epochs = range(start_epoch, 5)
-        transform = transforms.Compose([VerticalFlip(),
-                                        Resize((1024, 1024)), ToTensorLab(flag=0)])
+        transform = transforms.Compose(
+            [VerticalFlip(), Resize((1024)), ToTensorLab(flag=0)]
+        )
         create_and_train(transform, 3, epochs)
         start_epoch = epochs[-1] + 1
 
