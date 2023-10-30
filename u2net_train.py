@@ -7,7 +7,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from torchvision.transforms import Resize
 from model import U2NET
 from data_loader import (
     RandomCrop,
@@ -95,7 +94,7 @@ def save_model_as_onnx(model, device, ite_num, input_tensor_size=(1, 3, 320, 320
         output_names=["output"],
         dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
     )
-    print("Model saved to:", onnx_file_name)
+    print("Model saved to:", onnx_file_name, "\n")
 
 
 def save_checkpoint(state, filename="saved_models/checkpoint.pth.tar"):
@@ -128,55 +127,6 @@ def muti_bce_loss_fusion(d_list, labels_v):
     losses = [bce_loss(d, labels_v) for d in d_list]
     total_loss = sum(losses)
     return losses[0], total_loss
-
-
-def create_dataloader(img_name_list, lbl_name_list, transform, batch_size):
-    salobj_dataset = SalObjDataset(
-        img_name_list=img_name_list, lbl_name_list=lbl_name_list, transform=transform
-    )
-    salobj_dataloader = DataLoader(
-        salobj_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=8,  # adjust accordingly
-    )
-    return salobj_dataloader
-
-
-def train_for_one_epoch(net, optimizer, dataloader, device, save_frq):
-    net.train()
-
-    epoch_loss = 0.0
-
-    for i, data in enumerate(dataloader):
-        start_time = time.time()
-
-        inputs = data["image"].to(device).float()
-        labels = data["label"].to(device).float()
-
-        optimizer.zero_grad()
-        outputs = net(inputs)
-
-        first_output, combined_loss = muti_bce_loss_fusion(outputs, labels)
-        combined_loss.backward()
-        optimizer.step()
-
-        epoch_loss += combined_loss.item()
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-
-        print(
-            f"Loss for this batch: {combined_loss.item()}, Time taken for this batch: {elapsed_time:.2f}s"
-        )
-
-        # Save model every save_frq iterations
-        if (i + 1) % save_frq == 0:
-            iteration_count = (epoch + 1) * len(
-                dataloader
-            ) + i  # compute overall iteration count
-            save_model_as_onnx(net, device, iteration_count)
-
-    return epoch_loss / len(dataloader)
 
 
 def train_model(net, optimizer, dataloader, device, epoch_num, save_frq, check_frq):
@@ -271,44 +221,31 @@ def main():
         print("Different amounts of images and masks, can't proceed mate")
         return
 
+    salobj_dataset = SalObjDataset(
+        img_name_list=tra_img_name_list,
+        lbl_name_list=tra_lbl_name_list,
+        transform=transforms.Compose([RandomCrop(320), ToTensorLab(flag=0)]),
+        # the model will be trained on many random 320*320 crops of your images
+    )
+    salobj_dataloader = DataLoader(
+        salobj_dataset,
+        batch_size=batch,
+        shuffle=True,
+        num_workers=8,  # also reduce this if you don't have many cores available
+        # or set num_workers = multiprocessing.cpu_count()
+    )
+
     net = U2NET(3, 1)
     net.to(device)
-    net.train()
 
     optimizer = optim.Adam(
         net.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0
     )
 
-    for epoch in range(epoch_num):
-        if (
-            epoch < 10
-        ):  # For the first 10 epochs, train on full images resized to 1024x1024
-            transform = transforms.Compose([Resize((1024, 1024)), ToTensorLab(flag=0)])
-            salobj_dataloader = create_dataloader(
-                tra_img_name_list, tra_lbl_name_list, transform, int(batch / 3)
-            )
-        else:  # After 10 epochs, train on 320x320 random crops
-            transform = transforms.Compose([RandomCrop(320), ToTensorLab(flag=0)])
-            salobj_dataloader = create_dataloader(
-                tra_img_name_list, tra_lbl_name_list, transform, batch
-            )
-
-        avg_epoch_loss = train_for_one_epoch(
-            net, optimizer, salobj_dataloader, device, save_frq
-        )
-
-        print(f"Average Loss for Epoch {epoch+1}: {avg_epoch_loss}")
-
-        if (epoch + 1) % check_frq == 0:
-            save_checkpoint(
-                {
-                    "iteration_count": (epoch + 1) * len(salobj_dataloader),
-                    "state_dict": net.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                }
-            )
-
-    print("Training finished!")
+    # Training loop
+    train_model(
+        net, optimizer, salobj_dataloader, device, epoch_num, save_frq, check_frq
+    )
 
 
 if __name__ == "__main__":

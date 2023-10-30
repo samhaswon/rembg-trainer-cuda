@@ -7,6 +7,7 @@ import torchvision.transforms.functional as TF
 from torchvision.utils import save_image
 from torch.utils.data import Dataset
 from PIL import Image
+import imageio
 
 
 class RandomCrop:
@@ -76,14 +77,20 @@ class SalObjDataset(Dataset):
         return len(self.img_name_list)
 
     def __getitem__(self, idx):
-        image = Image.open(self.img_name_list[idx]).convert("RGB")
-        label = Image.open(self.lbl_name_list[idx]).convert("L")  # grayscale
+        image_array = imageio.imread(self.img_name_list[idx])
+        label_array = imageio.imread(self.lbl_name_list[idx])
+
+        # Convert arrays to PIL images for compatibility with existing transforms
+        image = Image.fromarray(image_array)
+        label = Image.fromarray(label_array)
+
+        # If your images aren't already RGB or grayscale, you can convert them:
+        # image = image.convert("RGB")
+        # label = label.convert("L")
+
         sample = {"image": image, "label": label}
 
         if self.transform:
             sample = self.transform(sample)
-
-        image.close()
-        label.close()
 
         return sample
