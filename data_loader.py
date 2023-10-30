@@ -1,7 +1,9 @@
 import gc
+import os
 import numpy as np
 import torchvision.transforms as transforms
 import torchvision.transforms.functional as TF
+from torchvision.utils import save_image
 from torch.utils.data import Dataset
 from PIL import Image
 import imageio
@@ -151,5 +153,12 @@ class SalObjDataset(Dataset):
 
         if self.transform:
             sample = self.transform(sample)
+
+        # save_dir = "transformed_images"
+        # os.makedirs(save_dir, exist_ok=True)
+
+        # Save the transformed image and label
+        # save_image(sample["image"], os.path.join(save_dir, f"transformed_image_{idx}.png"))
+        # save_image(sample["label"], os.path.join(save_dir, f"transformed_label_{idx}.png"))
 
         return sample

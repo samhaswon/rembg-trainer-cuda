@@ -184,7 +184,7 @@ def train_epochs(net, optimizer, dataloader, device, epochs):
         start_time = time.time()
 
         # this is where the training occurs!
-        print(f"Epoch: {epoch + 1}/{len(epochs)}")
+        print(f"Epoch: {epoch + 1}/{epochs[-1] + 1}")
         epoch_loss = train_model(net, optimizer, dataloader, device)
         print(f"Loss per epoch: {epoch_loss}\n")
 
@@ -195,7 +195,8 @@ def train_epochs(net, optimizer, dataloader, device, epochs):
 
         # Saves model every save_frq iterations or during the last one
         if (epoch + 1) % SAVE_FRQ == 0 or epoch + 1 == len(epochs):
-            save_model_as_onnx(net, device, epoch + 1)  # in ONNX format! ^_^ UwU
+            # in ONNX format! ^_^ UwU
+            save_model_as_onnx(net, device, epoch + 1)
 
         # Saves checkpoint every check_frq epochs or during the last one
         if (epoch + 1) % CHECK_FRQ == 0 or epoch + 1 == len(epochs):
@@ -207,9 +208,9 @@ def train_epochs(net, optimizer, dataloader, device, epochs):
                 }
             )
             if epoch + 1 < len(epochs):
-                print("Checkpoint saved. Loading next crops…\n")
+                print("Checkpoint saved\n")
             else:
-                print("Final checkpoint made")
+                print("Final checkpoint made\n")
 
     return net
 
@@ -258,14 +259,14 @@ def main():
         train_epochs(net, optimizer, dataloader, device, epochs)
 
     if start_epoch < 3:
-        print("Learning the dataset itself")
+        print("Learning the dataset itself...\n")
         epochs = range(start_epoch, 3)
         transform = transforms.Compose([Resize(512), ToTensorLab(flag=0)])
         create_and_train(transform, batch, epochs)
         start_epoch = epochs[-1] + 1
 
     if start_epoch < 4:
-        print("Learning the random horizontal flips of dataset images")
+        print("Learning the random horizontal flips of dataset images...\n")
         epochs = range(start_epoch, 4)
         transform = transforms.Compose(
             [HorizontalFlip(), Resize(512), ToTensorLab(flag=0)]
@@ -274,7 +275,7 @@ def main():
         start_epoch = epochs[-1] + 1
 
     if start_epoch < 5:
-        print("Learning the random vertical flips of dataset images")
+        print("Learning the random vertical flips of dataset images...\n")
         epochs = range(start_epoch, 5)
         transform = transforms.Compose(
             [VerticalFlip(), Resize(512), ToTensorLab(flag=0)]
@@ -283,7 +284,7 @@ def main():
         start_epoch = epochs[-1] + 1
 
     if start_epoch < epoch_num:
-        print("Augmenting dataset with random crops")
+        print("Augmenting dataset with random crops...\n")
         epochs = range(start_epoch, epoch_num)
         transform = transforms.Compose(
             [Resize(1024), RandomCrop(256), ToTensorLab(flag=0)]
