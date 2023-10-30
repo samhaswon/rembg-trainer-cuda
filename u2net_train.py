@@ -6,13 +6,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torchvision import transforms
 from model import U2NET
-from data_loader import (
-    RandomCrop,
-    ToTensorLab,
-    SalObjDataset,
-)
+from data_loader import *
 
 SAVE_FRQ = 0
 CHECK_FRQ = 0
@@ -46,7 +41,7 @@ def get_args():
         "-s",
         "--save_frq",
         type=int,
-        default=2,
+        default=1,
         help="Frequency of saving onnx model (every X epochs).",
     )
     parser.add_argument(
@@ -91,7 +86,7 @@ def save_model_as_onnx(model, device, ite_num, input_tensor_size=(1, 3, 320, 320
         x,
         onnx_file_name,
         export_params=True,
-        opset_version=11,
+        opset_version=16,
         do_constant_folding=True,
         input_names=["input"],
         output_names=["output"],
@@ -110,9 +105,7 @@ def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
         epoch_count = checkpoint["epoch_count"]
         net.load_state_dict(checkpoint["state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer"])
-        print(
-            f"Loading checkpoint '{filename}', trained for {epoch_count} epochs..."
-        )
+        print(f"Loading checkpoint '{filename}', trained for {epoch_count} epochs...")
         return epoch_count
     else:
         print(f"No checkpoint found at '{filename}'. Starting from scratch...")
@@ -132,46 +125,28 @@ def muti_bce_loss_fusion(d_list, labels_v):
     return losses[0], total_loss
 
 
-def get_dataloaders(tra_img_name_list, tra_lbl_name_list, batch):
-    # Dataset with random crops
-    salobj_dataset_crop = SalObjDataset(
+def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
+    # Dataset with given transform
+    salobj_dataset = SalObjDataset(
         img_name_list=tra_img_name_list,
         lbl_name_list=tra_lbl_name_list,
-        transform=transforms.Compose([RandomCrop(320), ToTensorLab(flag=0)])
+        transform=transform,
     )
 
-    # Dataset with resized images
-    salobj_dataset_resize = SalObjDataset(
-        img_name_list=tra_img_name_list,
-        lbl_name_list=tra_lbl_name_list,
-        transform=transforms.Compose([transforms.Resize((1024, 1024)), ToTensorLab(flag=0)])
+    # DataLoader for the dataset
+    salobj_dataloader = DataLoader(
+        salobj_dataset, batch_size=batch_size, shuffle=True, num_workers=8
     )
 
-    # DataLoader for random crops
-    salobj_dataloader_crop = DataLoader(
-        salobj_dataset_crop,
-        batch_size=batch,
-        shuffle=True,
-        num_workers=8
-    )
-
-    # DataLoader for resized images
-    salobj_dataloader_resize = DataLoader(
-        salobj_dataset_resize,
-        batch_size=int(batch/3),
-        shuffle=True,
-        num_workers=8
-    )
-
-    return salobj_dataloader_crop, salobj_dataloader_resize
+    return salobj_dataloader
 
 
 def train_model(net, optimizer, dataloader, device):
     epoch_loss = 0.0
 
     for i, data in enumerate(dataloader):
-        inputs = data["image"].to(device).float()
-        labels = data["label"].to(device).float()
+        inputs = data["image"].to(device)
+        labels = data["label"].to(device)
 
         optimizer.zero_grad()
 
@@ -183,23 +158,21 @@ def train_model(net, optimizer, dataloader, device):
 
         epoch_loss += combined_loss.item()
 
-        if i<10:
+        if i < 10:
             print(
                 f"  Iteration:  {i + 1}/{len(dataloader)}, "
                 f"loss per iteration: {epoch_loss / (i + 1)}"
             )
         else:
             print(
-                f"  Iteration: {i+1}/{len(dataloader)}, "
-                f"loss per iteration: {epoch_loss / (i+1)}"
+                f"  Iteration: {i + 1}/{len(dataloader)}, "
+                f"loss per iteration: {epoch_loss / (i + 1)}"
             )
 
     return epoch_loss
 
 
 def train_epochs(net, optimizer, dataloader, device, epochs):
-    print("---\n")
-
     for epoch in epochs:
         start_time = time.time()
 
@@ -215,9 +188,7 @@ def train_epochs(net, optimizer, dataloader, device, epochs):
 
         # Saves model every save_frq iterations or during the last one
         if (epoch + 1) % SAVE_FRQ == 0 or epoch + 1 == len(epochs):
-            save_model_as_onnx(
-                net, device, epoch + 1
-            )  # in ONNX format! ^_^ UwU
+            save_model_as_onnx(net, device, epoch + 1)  # in ONNX format! ^_^ UwU
 
         # Saves checkpoint every check_frq epochs or during the last one
         if (epoch + 1) % CHECK_FRQ == 0 or epoch + 1 == len(epochs):
@@ -243,6 +214,7 @@ def main():
     global SAVE_FRQ, CHECK_FRQ
     SAVE_FRQ = args.save_frq
     CHECK_FRQ = args.check_frq
+
     tra_image_dir = args.tra_image_dir
     tra_label_dir = args.tra_label_dir
     epoch_num = args.epoch_num
@@ -260,8 +232,6 @@ def main():
         print("Different amounts of images and masks, can't proceed mate")
         return
 
-
-
     net = U2NET(3, 1)
     net.to(device)
     net.train()
@@ -270,12 +240,42 @@ def main():
         net.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0
     )
 
-    salobj_dataloader_crop, salobj_dataloader_resize = get_dataloaders(tra_img_name_list, tra_lbl_name_list, batch)
+    start_epoch = load_checkpoint(net, optimizer)
+    print("---\n")
 
-    epochs = range(load_checkpoint(net, optimizer), epoch_num)
+    def create_and_train(transform, batch_size, epochs):
+        """Creates a dataloader and trains the network using the given parameters."""
+        dataloader = get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size)
+        train_epochs(net, optimizer, dataloader, device, epochs)
 
-    # Training loop
-    train_epochs(net, optimizer, salobj_dataloader_crop, device, epochs)
+    if start_epoch < 2:
+        print("Learning the dataset itself")
+        epochs = range(start_epoch, 3)
+        transform = transforms.Compose([Resize(1024), ToTensorLab(flag=0)])
+        create_and_train(transform, 3, epochs)
+        start_epoch = epochs[-1] + 1
+
+    if start_epoch < 3:
+        print("Learning the random horizontal flips of dataset images")
+        epochs = range(start_epoch, 4)
+        transform = transforms.Compose([HorizontalFlip(),
+                                        Resize((1024, 1024)), ToTensorLab(flag=0)])
+        create_and_train(transform, 3, epochs)
+        start_epoch = epochs[-1] + 1
+
+    if start_epoch < 4:
+        print("Learning the random vertical flips of dataset images")
+        epochs = range(start_epoch, 5)
+        transform = transforms.Compose([VerticalFlip(),
+                                        Resize((1024, 1024)), ToTensorLab(flag=0)])
+        create_and_train(transform, 3, epochs)
+        start_epoch = epochs[-1] + 1
+
+    if start_epoch < epoch_num:
+        print("Augmenting dataset with random crops")
+        epochs = range(start_epoch, epoch_num)
+        transform = transforms.Compose([RandomCrop(320), ToTensorLab(flag=0)])
+        create_and_train(transform, batch, epochs)
 
 
 if __name__ == "__main__":
