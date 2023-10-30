@@ -233,9 +233,7 @@ def train_epochs(net, optimizer, scheduler, dataloader, device, epochs):
                 }
             )
             if epoch + 1 < len(epochs):
-                print("Checkpoint saved\n")
-            else:
-                print("Final checkpoint made\n")
+                print("Checkpoint made\n")
 
     return net
 
@@ -315,7 +313,7 @@ def main():
         print("Augmenting dataset with random crops...\n")
         epochs = range(start_epoch, epoch_num)
         transform = transforms.Compose(
-            [Resize(1024), RandomCrop(256), ToTensorLab(flag=0)]
+            [Resize(2304), RandomCrop(256), ToTensorLab(flag=0)]
         )
         create_and_train(transform, batch * 2, epochs)
 

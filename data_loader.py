@@ -25,6 +25,7 @@ class RandomCrop:
         image, label = sample["image"], sample["label"]
 
         while True:  # keep cropping until a non-white crop is found
+            iter = 0
             i, j, h, w = transforms.RandomCrop.get_params(
                 image, output_size=self.output_size
             )
@@ -37,8 +38,17 @@ class RandomCrop:
             white_pixels = np.sum(numpy_img == 255)
             total_pixels = numpy_img.size
 
-            if white_pixels / total_pixels <= 0.95:
-                break  # exit the loop if not more than 95% of the pixels are white
+            iter = iter+1
+            if iter > 30:
+                print("spend more than 30 iterations trying to find random crop on image")
+            if white_pixels / total_pixels <= 0.97:
+                break  # exit the loop if not more than 97% of the pixels are white
+            # else: do something with the images
+                # center = image.size[0] // 2  # Calculate the center (assuming a square image)
+
+                # Move i and j closer to the center
+                # i = max(0, min(i + (center - i) // 2, image.size[1] - h))
+                # j = max(0, min(j + (center - j) // 2, image.size[0] - w))
 
         # Save the cropped images
         """save_dir = "steps"
