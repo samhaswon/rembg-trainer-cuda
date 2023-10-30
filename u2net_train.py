@@ -52,21 +52,21 @@ def get_args():
         help="Directory with masks.",
     )
     parser.add_argument(
-        "-e", "--epoch_num", type=int, default=200, help="Number of epochs."
+        "-e", "--epoch_num", type=int, default=100, help="Number of epochs."
     )
     parser.add_argument(
         "-s",
         "--save_frq",
         type=int,
-        default=1,
-        help="Frequency of saving onnx model (every X epochs).",
+        default=5,
+        help="Frequency of saving onnx model, after done with initial training (every X epochs).",
     )
     parser.add_argument(
         "-c",
         "--check_frq",
         type=int,
-        default=1,
-        help="Frequency of saving checkpoints (every X epochs).",
+        default=5,
+        help="Frequency of saving checkpoints, after done with initial training (every X epochs).",
     )
     parser.add_argument(
         "-b",
@@ -315,7 +315,7 @@ def main():
         transform = transforms.Compose(
             [Resize(2304), RandomCrop(256), ToTensorLab(flag=0)]
         )
-        create_and_train(transform, batch * 2, epochs)
+        create_and_train(transform, batch * 4, epochs)
 
 
 if __name__ == "__main__":

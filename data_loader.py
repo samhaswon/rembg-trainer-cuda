@@ -1,4 +1,5 @@
 import gc
+import traceback
 
 import imageio
 import numpy as np
@@ -32,30 +33,30 @@ class RandomCrop:
         cells = [(i, j) for i in range(0, w, grid_size) for j in range(0, h, grid_size)]
         np.random.shuffle(cells)
 
-        for threshold in [
-            0.95,
-            0.98,
-            0.99,
-        ]:  # Gradually relax the white pixels constraint
-            for i, j in cells:
-                if i + self.output_size[0] <= w and j + self.output_size[1] <= h:
-                    cropped_image = TF.crop(image, i, j, *self.output_size)
-                    cropped_label = TF.crop(label, i, j, *self.output_size)
+        try:
+            for threshold in [
+                0.80,
+                0.90,
+                0.95,
+                0.98,
+                0.99,
+            ]:  # Gradually relax the white pixels constraint
+                for i, j in cells:
+                    if i + self.output_size[0] <= w and j + self.output_size[1] <= h:
+                        cropped_image = TF.crop(image, i, j, *self.output_size)
+                        cropped_label = TF.crop(label, i, j, *self.output_size)
 
-                    if (
-                        self._calculate_white_percentage(np.array(cropped_image))
-                        <= threshold
-                    ):
-                        return {"image": cropped_image, "label": cropped_label}
+                        if (
+                            self._calculate_white_percentage(np.array(cropped_image))
+                            <= threshold
+                        ):
+                            return {"image": cropped_image, "label": cropped_label}
 
-        print("No suitable crop found. Returning a random crop.")
-        i, j, h, w = transforms.RandomCrop.get_params(
-            image, output_size=self.output_size
-        )
-        return {
-            "image": TF.crop(image, i, j, h, w),
-            "label": TF.crop(label, i, j, h, w),
-        }
+            raise ValueError("Fully white image is given :(")
+
+        except ValueError as e:
+            print(f"Error: {str(e)}")
+            raise
 
 
 class HorizontalFlip:
