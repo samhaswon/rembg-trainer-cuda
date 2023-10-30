@@ -136,8 +136,8 @@ def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
     )
 
     cores = 8
-    if batch_size == 3:
-        cores = 2  # otherwise fails with 32 gigs 🤯 I'm doing something wrong, probably
+    if batch_size == 10:
+        cores = 2  # freeing up memory a bit
 
     # DataLoader for the dataset
     salobj_dataloader = DataLoader(
@@ -260,32 +260,34 @@ def main():
     if start_epoch < 2:
         print("Learning the dataset itself")
         epochs = range(start_epoch, 3)
-        transform = transforms.Compose([Resize(1024), ToTensorLab(flag=0)])
-        create_and_train(transform, 3, epochs)
+        transform = transforms.Compose([Resize(512), ToTensorLab(flag=0)])
+        create_and_train(transform, 10, epochs)
         start_epoch = epochs[-1] + 1
 
     if start_epoch < 3:
         print("Learning the random horizontal flips of dataset images")
         epochs = range(start_epoch, 4)
         transform = transforms.Compose(
-            [HorizontalFlip(), Resize((1024)), ToTensorLab(flag=0)]
+            [HorizontalFlip(), Resize(512), ToTensorLab(flag=0)]
         )
-        create_and_train(transform, 3, epochs)
+        create_and_train(transform, 10, epochs)
         start_epoch = epochs[-1] + 1
 
     if start_epoch < 4:
         print("Learning the random vertical flips of dataset images")
         epochs = range(start_epoch, 5)
         transform = transforms.Compose(
-            [VerticalFlip(), Resize((1024)), ToTensorLab(flag=0)]
+            [VerticalFlip(), Resize(512), ToTensorLab(flag=0)]
         )
-        create_and_train(transform, 3, epochs)
+        create_and_train(transform, 10, epochs)
         start_epoch = epochs[-1] + 1
 
     if start_epoch < epoch_num:
         print("Augmenting dataset with random crops")
         epochs = range(start_epoch, epoch_num)
-        transform = transforms.Compose([RandomCrop(320), ToTensorLab(flag=0)])
+        transform = transforms.Compose(
+            [Resize(1024), RandomCrop(256), ToTensorLab(flag=0)]
+        )
         create_and_train(transform, batch, epochs)
 
 
