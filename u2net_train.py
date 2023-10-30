@@ -94,7 +94,7 @@ def save_model_as_onnx(model, device, ite_num, input_tensor_size=(1, 3, 320, 320
         output_names=["output"],
         dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
     )
-    print("Model saved to:", onnx_file_name)
+    print("Model saved to:", onnx_file_name, "\n")
 
 
 def save_checkpoint(state, filename="saved_models/checkpoint.pth.tar"):
