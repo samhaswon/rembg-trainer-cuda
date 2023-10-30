@@ -35,8 +35,9 @@ class RandomCrop:
 
         try:
             for threshold in [
-                0.80,
-                0.90,
+                0.5,
+                0.8,
+                0.9,
                 0.95,
                 0.98,
                 0.99,
