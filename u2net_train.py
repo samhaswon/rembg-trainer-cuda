@@ -67,9 +67,11 @@ def get_args():
 def get_device():
     if torch.cuda.is_available():
         print("NVIDIA CUDA acceleration enabled")
+        torch.multiprocessing.set_start_method("spawn")
         return torch.device("cuda:0")
     elif torch.backends.mps.is_available():
         print("Apple Metal Performance Shaders acceleration enabled")
+        torch.multiprocessing.set_start_method("fork")
         return torch.device("mps")
     else:
         print("No GPU acceleration :/")
@@ -196,6 +198,8 @@ def train_model(net, optimizer, dataloader, device, epoch_num, save_frq, check_f
 def main():
     args = get_args()
     device = get_device()
+
+    # subprocess.run(["ulimit", "-n", "4096"], shell=True, check=True)
 
     tra_image_dir = args.tra_image_dir
     tra_label_dir = args.tra_label_dir

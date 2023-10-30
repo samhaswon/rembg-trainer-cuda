@@ -83,4 +83,7 @@ class SalObjDataset(Dataset):
         if self.transform:
             sample = self.transform(sample)
 
+        image.close()
+        label.close()
+
         return sample
