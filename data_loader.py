@@ -9,57 +9,53 @@ from torch.utils.data import Dataset
 
 
 class RandomCrop:
-    step_count = 0  # static variable to keep track of the count
-
     def __init__(self, output_size):
         assert isinstance(output_size, (int, tuple))
         if isinstance(output_size, int):
-            self.output_size = (
-                output_size,
-                output_size,
-            )  # Convert to tuple (height, width)
+            self.output_size = (output_size, output_size)
         else:
             self.output_size = output_size
+
+    def _calculate_white_percentage(self, img):
+        white_pixels = np.sum(img == 255)
+        total_pixels = img.size
+        return white_pixels / total_pixels
 
     def __call__(self, sample):
         image, label = sample["image"], sample["label"]
 
-        while True:  # keep cropping until a non-white crop is found
-            iter = 0
-            i, j, h, w = transforms.RandomCrop.get_params(
-                image, output_size=self.output_size
-            )
-            image = TF.crop(image, i, j, h, w)
-            label = TF.crop(label, i, j, h, w)
+        w, h = image.size
+        grid_size = self.output_size[
+            0
+        ]  # Assuming you want the grid to be of the same size as the crop
 
-            # Convert the cropped image to numpy array
-            numpy_img = np.array(image)
+        cells = [(i, j) for i in range(0, w, grid_size) for j in range(0, h, grid_size)]
+        np.random.shuffle(cells)
 
-            white_pixels = np.sum(numpy_img == 255)
-            total_pixels = numpy_img.size
+        for threshold in [
+            0.95,
+            0.98,
+            0.99,
+        ]:  # Gradually relax the white pixels constraint
+            for i, j in cells:
+                if i + self.output_size[0] <= w and j + self.output_size[1] <= h:
+                    cropped_image = TF.crop(image, i, j, *self.output_size)
+                    cropped_label = TF.crop(label, i, j, *self.output_size)
 
-            iter = iter+1
-            if iter > 30:
-                print("spend more than 30 iterations trying to find random crop on image")
-            if white_pixels / total_pixels <= 0.97:
-                break  # exit the loop if not more than 97% of the pixels are white
-            # else: do something with the images
-                # center = image.size[0] // 2  # Calculate the center (assuming a square image)
+                    if (
+                        self._calculate_white_percentage(np.array(cropped_image))
+                        <= threshold
+                    ):
+                        return {"image": cropped_image, "label": cropped_label}
 
-                # Move i and j closer to the center
-                # i = max(0, min(i + (center - i) // 2, image.size[1] - h))
-                # j = max(0, min(j + (center - j) // 2, image.size[0] - w))
-
-        # Save the cropped images
-        """save_dir = "steps"
-        os.makedirs(save_dir, exist_ok=True)
-        RandomCrop.step_count += 1
-        to_tensor = transforms.ToTensor()
-        tensor_img = to_tensor(cropped_image)
-        save_image(
-            tensor_img, os.path.join(save_dir, f"step{RandomCrop.step_count}.png")
-        )"""
-        return {"image": image, "label": label}
+        print("No suitable crop found. Returning a random crop.")
+        i, j, h, w = transforms.RandomCrop.get_params(
+            image, output_size=self.output_size
+        )
+        return {
+            "image": TF.crop(image, i, j, h, w),
+            "label": TF.crop(label, i, j, h, w),
+        }
 
 
 class HorizontalFlip:
