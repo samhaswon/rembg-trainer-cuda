@@ -56,8 +56,8 @@ def get_args():
         "-b",
         "--batch",
         type=int,
-        default=25,
-        help="Size of a single batch. Warning: affects VRAM usage! Set to amount of VRAM in gigabytes - 20%%.",
+        default=10,
+        help="Size of a single batch. Warning: affects VRAM usage! Set to amount of VRAM in gigabytes / 3.",
     )
 
     return parser.parse_args()
@@ -261,7 +261,7 @@ def main():
         print("Learning the dataset itself")
         epochs = range(start_epoch, 3)
         transform = transforms.Compose([Resize(512), ToTensorLab(flag=0)])
-        create_and_train(transform, 10, epochs)
+        create_and_train(transform, batch, epochs)
         start_epoch = epochs[-1] + 1
 
     if start_epoch < 3:
@@ -270,7 +270,7 @@ def main():
         transform = transforms.Compose(
             [HorizontalFlip(), Resize(512), ToTensorLab(flag=0)]
         )
-        create_and_train(transform, 10, epochs)
+        create_and_train(transform, batch, epochs)
         start_epoch = epochs[-1] + 1
 
     if start_epoch < 4:
@@ -279,7 +279,7 @@ def main():
         transform = transforms.Compose(
             [VerticalFlip(), Resize(512), ToTensorLab(flag=0)]
         )
-        create_and_train(transform, 10, epochs)
+        create_and_train(transform, batch, epochs)
         start_epoch = epochs[-1] + 1
 
     if start_epoch < epoch_num:
@@ -288,7 +288,7 @@ def main():
         transform = transforms.Compose(
             [Resize(1024), RandomCrop(256), ToTensorLab(flag=0)]
         )
-        create_and_train(transform, batch, epochs)
+        create_and_train(transform, batch*2, epochs)
 
 
 if __name__ == "__main__":
