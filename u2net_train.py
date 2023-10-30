@@ -45,35 +45,74 @@ def get_args():
         help="Directory with images.",
     )
     parser.add_argument(
-        "-l",
-        "--tra_label_dir",
+        "-m",
+        "--tra_masks_dir",
         type=str,
         default="masks",
         help="Directory with masks.",
-    )
-    parser.add_argument(
-        "-e", "--epoch_num", type=int, default=100, help="Number of epochs."
     )
     parser.add_argument(
         "-s",
         "--save_frq",
         type=int,
         default=5,
-        help="Frequency of saving onnx model, after done with initial training (every X epochs).",
+        help="Frequency of saving onnx model (every X epochs).",
     )
     parser.add_argument(
         "-c",
         "--check_frq",
         type=int,
         default=5,
-        help="Frequency of saving checkpoints, after done with initial training (every X epochs).",
+        help="Frequency of saving checkpoints (every X epochs).",
     )
     parser.add_argument(
         "-b",
         "--batch",
         type=int,
         default=10,
-        help="Size of a single batch. Warning: affects VRAM usage! Set to amount of VRAM in gigabytes / 3.",
+        help="Size of a single batch loaded into memory. Set to amount of processing memory in gigabytes divided by 3.",
+    )
+    parser.add_argument(
+        "-p",
+        "--plain_resized",
+        type=int,
+        default=1,
+        help="Number of training epochs for plain_resized target.",
+    )
+    parser.add_argument(
+        "-vf",
+        "--vflipped",
+        type=int,
+        default=1,
+        help="Number of training epochs for flipped_v target.",
+    )
+    parser.add_argument(
+        "-hf",
+        "--hflipped",
+        type=int,
+        default=1,
+        help="Number of training epochs for flipped_h target.",
+    )
+    parser.add_argument(
+        "-left",
+        "--rotated_l",
+        type=int,
+        default=1,
+        help="Number of training epochs for rotated_l target.",
+    )
+    parser.add_argument(
+        "-right",
+        "--rotated_r",
+        type=int,
+        default=1,
+        help="Number of training epochs for rotated_r target.",
+    )
+    parser.add_argument(
+        "-r",
+        "--rand",
+        type=int,
+        default=5,
+        help="Number of training epochs for random_crops target.",
     )
 
     return parser.parse_args()
@@ -114,20 +153,29 @@ def save_model_as_onnx(model, device, ite_num, input_tensor_size=(1, 3, 320, 320
 
 
 def save_checkpoint(state, filename="saved_models/checkpoint.pth.tar"):
-    torch.save(state, filename)
+    torch.save({"state": state}, filename)
 
 
 def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
     if os.path.isfile(filename):
         checkpoint = torch.load(filename)
-        epoch_count = checkpoint["epoch_count"]
-        net.load_state_dict(checkpoint["state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
-        print(f"Loading checkpoint '{filename}', trained for {epoch_count} epochs...")
-        return epoch_count
+        net.load_state_dict(checkpoint["state"]["state_dict"])
+        optimizer.load_state_dict(checkpoint["state"]["optimizer"])
+        training_counts = checkpoint["state"]["training_counts"]
+        print(
+            f"Loading checkpoint '{filename}' with training counts: {training_counts}..."
+        )
+        return training_counts
     else:
         print(f"No checkpoint file found at '{filename}'. Starting from scratch...")
-        return 0
+        return {
+            "plain_resized": 0,
+            "flipped_v": 0,
+            "flipped_h": 0,
+            "rotated_l": 0,
+            "rotated_r": 0,
+            "random_crops": 0,
+        }
 
 
 def load_dataset(img_dir, lbl_dir, ext):
@@ -204,7 +252,9 @@ def train_model(net, optimizer, scheduler, dataloader, device):
     return epoch_loss
 
 
-def train_epochs(net, optimizer, scheduler, dataloader, device, epochs):
+def train_epochs(
+    net, optimizer, scheduler, dataloader, device, epochs, training_counts, key
+):
     for epoch in epochs:
         start_time = time.time()
 
@@ -218,6 +268,9 @@ def train_epochs(net, optimizer, scheduler, dataloader, device, epochs):
                 f"Expected performance is {time.time() - start_time:.2f} seconds per epoch.\n"
             )
 
+        # Increment the corresponding training count
+        training_counts[key] += 1
+
         # Saves model every save_frq iterations or during the last one
         if (epoch + 1) % SAVE_FRQ == 0 or epoch + 1 == len(epochs):
             # in ONNX format! ^_^ UwU
@@ -230,6 +283,7 @@ def train_epochs(net, optimizer, scheduler, dataloader, device, epochs):
                     "epoch_count": epoch + 1,
                     "state_dict": net.state_dict(),
                     "optimizer": optimizer.state_dict(),
+                    "training_counts": training_counts,
                 }
             )
             if epoch + 1 < len(epochs):
@@ -239,17 +293,24 @@ def train_epochs(net, optimizer, scheduler, dataloader, device, epochs):
 
 
 def main():
-    args = get_args()
     device = get_device()
 
+    args = get_args()
     global SAVE_FRQ, CHECK_FRQ
     SAVE_FRQ = args.save_frq
     CHECK_FRQ = args.check_frq
-
     tra_image_dir = args.tra_image_dir
-    tra_label_dir = args.tra_label_dir
-    epoch_num = args.epoch_num
+    tra_label_dir = args.tra_masks_dir
     batch = args.batch
+
+    targets = {
+        "plain_resized": args.plain_resized,
+        "flipped_v": args.vflipped,
+        "flipped_h": args.hflipped,
+        "rotated_l": args.rotated_l,
+        "rotated_r": args.rotated_r,
+        "random_crops": args.rand,
+    }
 
     tra_img_name_list, tra_lbl_name_list = load_dataset(
         tra_image_dir, tra_label_dir, ".png"
@@ -271,51 +332,72 @@ def main():
         net.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0
     )
 
-    # Let's say you want the minimum learning rate to be 1e-6
-    scheduler = CosineAnnealingLR(optimizer, T_max=epoch_num, eta_min=1e-6)
-
-    start_epoch = load_checkpoint(net, optimizer)
+    training_counts = load_checkpoint(net, optimizer)
     print("---\n")
 
-    def create_and_train(transform, batch_size, epochs):
+    scheduler = CosineAnnealingLR(optimizer, T_max=sum(targets.values()), eta_min=1e-6)
+
+    def create_and_train(transform, batch_size, epochs, train_type):
         """Creates a dataloader and trains the network using the given parameters."""
         dataloader = get_dataloader(
             tra_img_name_list, tra_lbl_name_list, transform, batch_size
         )
-        train_epochs(net, optimizer, scheduler, dataloader, device, epochs)
-
-    if start_epoch < 3:
-        print("Learning the dataset itself...\n")
-        epochs = range(start_epoch, 3)
-        transform = transforms.Compose([Resize(512), ToTensorLab(flag=0)])
-        create_and_train(transform, batch, epochs)
-        start_epoch = epochs[-1] + 1
-
-    if start_epoch < 4:
-        print("Learning the random horizontal flips of dataset images...\n")
-        epochs = range(start_epoch, 4)
-        transform = transforms.Compose(
-            [HorizontalFlip(), Resize(512), ToTensorLab(flag=0)]
+        train_epochs(
+            net,
+            optimizer,
+            scheduler,
+            dataloader,
+            device,
+            epochs,
+            training_counts,
+            train_type,
         )
-        create_and_train(transform, batch, epochs)
-        start_epoch = epochs[-1] + 1
 
-    if start_epoch < 5:
-        print("Learning the random vertical flips of dataset images...\n")
-        epochs = range(start_epoch, 5)
-        transform = transforms.Compose(
-            [VerticalFlip(), Resize(512), ToTensorLab(flag=0)]
-        )
-        create_and_train(transform, batch, epochs)
-        start_epoch = epochs[-1] + 1
+    # Configuration dictionary
+    train_configs = {
+        "plain_resized": {
+            "message": "Learning the dataset itself...",
+            "transform": [Resize(512), ToTensorLab(flag=0)],
+            "batch_factor": 1,
+        },
+        "flipped_h": {
+            "message": "Learning the horizontal flips of dataset images...",
+            "transform": [Resize(512), HorizontalFlip(), ToTensorLab(flag=0)],
+            "batch_factor": 1,
+        },
+        "flipped_v": {
+            "message": "Learning the vertical flips of dataset images...",
+            "transform": [Resize(512), VerticalFlip(), ToTensorLab(flag=0)],
+            "batch_factor": 1,
+        },
+        "rotated_l": {
+            "message": "Learning the left rotations of dataset images...",
+            "transform": [Resize(512), Rotation(90), ToTensorLab(flag=0)],
+            "batch_factor": 1,
+        },
+        "rotated_r": {
+            "message": "Learning the right rotation of dataset images...",
+            "transform": [Resize(512), Rotation(270), ToTensorLab(flag=0)],
+            "batch_factor": 1,
+        },
+        "random_crops": {
+            "message": "Augmenting dataset with random crops...",
+            "transform": [Resize(2304), RandomCrop(256), ToTensorLab(flag=0)],
+            "batch_factor": 4,  # because they are smaller => we can fit more in memory
+        },
+    }
 
-    if start_epoch < epoch_num:
-        print("Augmenting dataset with random crops...\n")
-        epochs = range(start_epoch, epoch_num)
-        transform = transforms.Compose(
-            [Resize(2304), RandomCrop(256), ToTensorLab(flag=0)]
-        )
-        create_and_train(transform, batch * 4, epochs)
+    # Training loop
+    for train_type, config in train_configs.items():
+        if training_counts[train_type] < targets[train_type]:
+            print(config["message"])
+            epochs = range(training_counts[train_type], targets[train_type])
+            transform = transforms.Compose(config["transform"])
+
+            create_and_train(
+                transform, batch * config["batch_factor"], epochs, train_type
+            )
+            training_counts[train_type] = targets[train_type]
 
 
 if __name__ == "__main__":

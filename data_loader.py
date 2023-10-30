@@ -82,24 +82,16 @@ class VerticalFlip:
         return {"image": image, "label": label}
 
 
-class Rotation90:
+class Rotation:
+    def __init__(self, degrees):
+        self.degrees = degrees
+
     def __call__(self, sample):
         image, label = sample["image"], sample["label"]
 
-        # Apply 90-degree rotation
-        image = TF.rotate(image, 90)
-        label = TF.rotate(label, 90)
-
-        return {"image": image, "label": label}
-
-
-class Rotation270:
-    def __call__(self, sample):
-        image, label = sample["image"], sample["label"]
-
-        # Apply 270-degree rotation
-        image = TF.rotate(image, 270)
-        label = TF.rotate(label, 270)
+        # Apply rotation
+        image = TF.rotate(image, self.degrees)
+        label = TF.rotate(label, self.degrees)
 
         return {"image": image, "label": label}
 
