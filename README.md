@@ -4,7 +4,9 @@ This code allows you to easily train U2-Net model in [ONNX](https://github.com/o
 
 This work is based off [U2Net](https://github.com/xuebinqin/U-2-Net) repo, which is under Apache license. The derivative work is loicensed under MIT; do as you please with it.
 
-Default parameters are fine-tuned for maximum performance on systems with 32gb of processing memory, like the Apple M1 Pro — 25 crops are loaded in memory per iteration thanks to 8 loader threads, which consumes about 26gb of VRAM. Adjust accordingly.
+Default parameters are fine-tuned for maximum performance on systems with 32gb of processing memory, like the Apple M1 Pro. Adjust accordingly. 
+
+Computations are performed in float32. For CUDA, you can easily rewrite this code with half precision calculations for increased performance. Apex library can help you with that. 
 
 If the training is interrupted for any reason, don't worry — the program saves its state regularly, allowing you to resume from where you left off.
 
@@ -20,7 +22,7 @@ If the training is interrupted for any reason, don't worry — the program saves
 - Once you've had your fill of waiting, here's how you use resulting model with rembg:
 
 ```bash
-rembg p -w input output -m u2net_custom -x '{"model_path": "/saved_models/u2net/2700.onnx"}'
+rembg p -w input output -m u2net_custom -x '{"model_path": "/saved_models/u2net/27.onnx"}'
 # input — folder with images to have their backgrounds removed
 # output — folder for resulting images processed with custom model
 # adjust path(s) as necessary!
