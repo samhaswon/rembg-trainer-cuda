@@ -201,7 +201,7 @@ def train_epochs(net, optimizer, dataloader, device, epochs):
         if (epoch + 1) % CHECK_FRQ == 0 or epoch + 1 == len(epochs):
             save_checkpoint(
                 {
-                    "epoch_count": epoch,
+                    "epoch_count": epoch + 1,
                     "state_dict": net.state_dict(),
                     "optimizer": optimizer.state_dict(),
                 }
@@ -257,14 +257,14 @@ def main():
         )
         train_epochs(net, optimizer, dataloader, device, epochs)
 
-    if start_epoch < 2:
+    if start_epoch < 3:
         print("Learning the dataset itself")
         epochs = range(start_epoch, 3)
         transform = transforms.Compose([Resize(512), ToTensorLab(flag=0)])
         create_and_train(transform, batch, epochs)
         start_epoch = epochs[-1] + 1
 
-    if start_epoch < 3:
+    if start_epoch < 4:
         print("Learning the random horizontal flips of dataset images")
         epochs = range(start_epoch, 4)
         transform = transforms.Compose(
@@ -273,7 +273,7 @@ def main():
         create_and_train(transform, batch, epochs)
         start_epoch = epochs[-1] + 1
 
-    if start_epoch < 4:
+    if start_epoch < 5:
         print("Learning the random vertical flips of dataset images")
         epochs = range(start_epoch, 5)
         transform = transforms.Compose(
@@ -288,7 +288,7 @@ def main():
         transform = transforms.Compose(
             [Resize(1024), RandomCrop(256), ToTensorLab(flag=0)]
         )
-        create_and_train(transform, batch*2, epochs)
+        create_and_train(transform, batch * 2, epochs)
 
 
 if __name__ == "__main__":
