@@ -14,6 +14,9 @@ from data_loader import (
     SalObjDataset,
 )
 
+SAVE_FRQ = 0
+CHECK_FRQ = 0
+
 bce_loss = nn.BCELoss(reduction="mean")
 
 
@@ -43,14 +46,14 @@ def get_args():
         "-s",
         "--save_frq",
         type=int,
-        default=500,
-        help="Frequency of saving onnx model (every X iterations).",
+        default=2,
+        help="Frequency of saving onnx model (every X epochs).",
     )
     parser.add_argument(
         "-c",
         "--check_frq",
         type=int,
-        default=5,
+        default=1,
         help="Frequency of saving checkpoints (every X epochs).",
     )
     parser.add_argument(
@@ -104,13 +107,13 @@ def save_checkpoint(state, filename="saved_models/checkpoint.pth.tar"):
 def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
     if os.path.isfile(filename):
         checkpoint = torch.load(filename)
-        iteration_count = checkpoint["iteration_count"]
+        epoch_count = checkpoint["epoch_count"]
         net.load_state_dict(checkpoint["state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         print(
-            f"Loading checkpoint '{filename}', trained for {iteration_count} iterations..."
+            f"Loading checkpoint '{filename}', trained for {epoch_count} epochs..."
         )
-        return iteration_count
+        return epoch_count
     else:
         print(f"No checkpoint found at '{filename}'. Starting from scratch...")
         return 0
@@ -129,68 +132,106 @@ def muti_bce_loss_fusion(d_list, labels_v):
     return losses[0], total_loss
 
 
-def train_model(net, optimizer, dataloader, device, epoch_num, save_frq, check_frq):
-    iteration_count = load_checkpoint(net, optimizer)
-    cumulative_loss = 0.0
+def get_dataloaders(tra_img_name_list, tra_lbl_name_list, batch):
+    # Dataset with random crops
+    salobj_dataset_crop = SalObjDataset(
+        img_name_list=tra_img_name_list,
+        lbl_name_list=tra_lbl_name_list,
+        transform=transforms.Compose([RandomCrop(320), ToTensorLab(flag=0)])
+    )
+
+    # Dataset with resized images
+    salobj_dataset_resize = SalObjDataset(
+        img_name_list=tra_img_name_list,
+        lbl_name_list=tra_lbl_name_list,
+        transform=transforms.Compose([transforms.Resize((1024, 1024)), ToTensorLab(flag=0)])
+    )
+
+    # DataLoader for random crops
+    salobj_dataloader_crop = DataLoader(
+        salobj_dataset_crop,
+        batch_size=batch,
+        shuffle=True,
+        num_workers=8
+    )
+
+    # DataLoader for resized images
+    salobj_dataloader_resize = DataLoader(
+        salobj_dataset_resize,
+        batch_size=int(batch/3),
+        shuffle=True,
+        num_workers=8
+    )
+
+    return salobj_dataloader_crop, salobj_dataloader_resize
+
+
+def train_model(net, optimizer, dataloader, device):
     epoch_loss = 0.0
-    print("---\n")
 
-    for epoch in range(int(iteration_count / len(dataloader)), epoch_num):
-        net.train()
+    for i, data in enumerate(dataloader):
+        inputs = data["image"].to(device).float()
+        labels = data["label"].to(device).float()
 
-        for i, data in enumerate(dataloader):
-            iteration_count += 1
-            start_time = time.time()
+        optimizer.zero_grad()
 
-            inputs = data["image"].to(device).float()
-            labels = data["label"].to(device).float()
+        outputs = net(inputs)
 
-            optimizer.zero_grad()
-            outputs = net(inputs)
+        first_output, combined_loss = muti_bce_loss_fusion(outputs, labels)
+        combined_loss.backward()
+        optimizer.step()
 
-            first_output, combined_loss = muti_bce_loss_fusion(outputs, labels)
-            combined_loss.backward()
-            optimizer.step()
+        epoch_loss += combined_loss.item()
 
-            epoch_loss += combined_loss.item()
-            cumulative_loss += combined_loss.item()
-            end_time = time.time()
-            elapsed_time = end_time - start_time
-
+        if i<10:
             print(
-                f"Epoch: {epoch + 1}/{epoch_num}, Iteration: {iteration_count}/{len(dataloader)*(epoch+1)}\n"
-                f"Loss per epoch: {epoch_loss / iteration_count}, "
-                f"loss per run: {cumulative_loss / iteration_count}\n"
+                f"  Iteration:  {i + 1}/{len(dataloader)}, "
+                f"loss per iteration: {epoch_loss / (i + 1)}"
+            )
+        else:
+            print(
+                f"  Iteration: {i+1}/{len(dataloader)}, "
+                f"loss per iteration: {epoch_loss / (i+1)}"
             )
 
-            if iteration_count == 3:
-                print(
-                    f"Expected performance is {elapsed_time:.2f} per {len(dataloader)} crops.\n"
-                )
+    return epoch_loss
 
-            # Saves model every save_frq iterations or during the last one
-            if iteration_count % save_frq == 0 or (
-                epoch + 1 == epoch_num and iteration_count == len(dataloader)
-            ):
-                save_model_as_onnx(
-                    net, device, iteration_count
-                )  # in ONNX format! ^_^ UwU
 
-        # Saves checkpoint every check_frq iterations or during the last one
-        if (epoch + 1) % check_frq == 0 or epoch + 1 == epoch_num:
+def train_epochs(net, optimizer, dataloader, device, epochs):
+    print("---\n")
+
+    for epoch in epochs:
+        start_time = time.time()
+
+        # this is where the training occurs!
+        print(f"Epoch: {epoch + 1}/{len(epochs)}")
+        epoch_loss = train_model(net, optimizer, dataloader, device)
+        print(f"Loss per epoch: {epoch_loss}\n")
+
+        if epoch == 0:
+            print(
+                f"Expected performance is {time.time() - start_time:.2f} seconds per epoch.\n"
+            )
+
+        # Saves model every save_frq iterations or during the last one
+        if (epoch + 1) % SAVE_FRQ == 0 or epoch + 1 == len(epochs):
+            save_model_as_onnx(
+                net, device, epoch + 1
+            )  # in ONNX format! ^_^ UwU
+
+        # Saves checkpoint every check_frq epochs or during the last one
+        if (epoch + 1) % CHECK_FRQ == 0 or epoch + 1 == len(epochs):
             save_checkpoint(
                 {
-                    "iteration_count": iteration_count,
+                    "epoch_count": epoch,
                     "state_dict": net.state_dict(),
                     "optimizer": optimizer.state_dict(),
                 }
             )
-            if epoch + 1 < epoch_num:
+            if epoch + 1 < len(epochs):
                 print("Checkpoint saved. Loading next crops…\n")
             else:
                 print("Final checkpoint made")
-
-        epoch_loss = 0.0
 
     return net
 
@@ -199,14 +240,12 @@ def main():
     args = get_args()
     device = get_device()
 
-    # subprocess.run(["ulimit", "-n", "4096"], shell=True, check=True)
-
+    global SAVE_FRQ, CHECK_FRQ
+    SAVE_FRQ = args.save_frq
+    CHECK_FRQ = args.check_frq
     tra_image_dir = args.tra_image_dir
     tra_label_dir = args.tra_label_dir
     epoch_num = args.epoch_num
-    save_frq = args.save_frq
-    check_frq = args.check_frq
-
     batch = args.batch
 
     tra_img_name_list, tra_lbl_name_list = load_dataset(
@@ -221,31 +260,22 @@ def main():
         print("Different amounts of images and masks, can't proceed mate")
         return
 
-    salobj_dataset = SalObjDataset(
-        img_name_list=tra_img_name_list,
-        lbl_name_list=tra_lbl_name_list,
-        transform=transforms.Compose([RandomCrop(320), ToTensorLab(flag=0)]),
-        # the model will be trained on many random 320*320 crops of your images
-    )
-    salobj_dataloader = DataLoader(
-        salobj_dataset,
-        batch_size=batch,
-        shuffle=True,
-        num_workers=8,  # also reduce this if you don't have many cores available
-        # or set num_workers = multiprocessing.cpu_count()
-    )
+
 
     net = U2NET(3, 1)
     net.to(device)
+    net.train()
 
     optimizer = optim.Adam(
         net.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0
     )
 
+    salobj_dataloader_crop, salobj_dataloader_resize = get_dataloaders(tra_img_name_list, tra_lbl_name_list, batch)
+
+    epochs = range(load_checkpoint(net, optimizer), epoch_num)
+
     # Training loop
-    train_model(
-        net, optimizer, salobj_dataloader, device, epoch_num, save_frq, check_frq
-    )
+    train_epochs(net, optimizer, salobj_dataloader_crop, device, epochs)
 
 
 if __name__ == "__main__":
