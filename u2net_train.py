@@ -210,24 +210,33 @@ def save_checkpoint(state, filename="saved_models/checkpoint.pth.tar"):
 
 
 def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
+    training_counts = {
+        "plain_resized": 0,
+        "flipped_v": 0,
+        "flipped_h": 0,
+        "rotated_l": 0,
+        "rotated_r": 0,
+        "crops": 0,
+        "crops_loyal": 0,
+    }
+
     if os.path.isfile(filename):
         checkpoint = torch.load(filename)
         net.load_state_dict(checkpoint["state"]["state_dict"])
         optimizer.load_state_dict(checkpoint["state"]["optimizer"])
-        training_counts = checkpoint["state"]["training_counts"]
+
+        # Update the dictionary with values from the checkpoint
+        # Only updates keys that exist in both dictionaries
+        # This is done for expandability in future
+        for key in training_counts.keys():
+            if key in checkpoint["state"]["training_counts"]:
+                training_counts[key] = checkpoint["state"]["training_counts"][key]
+
         print(f"Loading checkpoint '{filename}'...")
-        return training_counts
     else:
         print(f"No checkpoint file found at '{filename}'. Starting from scratch...")
-        return {
-            "plain_resized": 0,
-            "flipped_v": 0,
-            "flipped_h": 0,
-            "rotated_l": 0,
-            "rotated_r": 0,
-            "crops": 0,
-            "crops_loyal": 0,
-        }
+
+    return training_counts
 
 
 def load_dataset(img_dir, lbl_dir, ext):
@@ -272,6 +281,7 @@ def train_model(net, optimizer, scheduler, dataloader, device):
     epoch_loss = 0.0
 
     for i, data in enumerate(dataloader):
+        print(f"        Iteration: {i + 1:4}/{len(dataloader)}, ", end="")
         inputs = data["image"].to(device)
         labels = data["label"].to(device)
         optimizer.zero_grad()
@@ -289,10 +299,7 @@ def train_model(net, optimizer, scheduler, dataloader, device):
 
         epoch_loss += combined_loss.item()
 
-        print(
-            f"  Iteration: {i + 1:4}/{len(dataloader)}, "
-            f"loss: {epoch_loss / (i + 1):.5f}"
-        )
+        print(f"loss: {epoch_loss / (i + 1):.5f}")
 
     return epoch_loss
 
@@ -300,29 +307,29 @@ def train_model(net, optimizer, scheduler, dataloader, device):
 def train_epochs(
     net, optimizer, scheduler, dataloader, device, epochs, training_counts, key
 ):
-    for epoch in epochs:
+    for index, epoch in enumerate(epochs):
         start_time = time.time()
 
         # this is where the training occurs!
-        print(f"Epoch: {epoch + 1}/{epochs[-1] + 1}")
+        print(f"    Epoch: {epoch + 1}/{epochs[-1] + 1}")
         epoch_loss = train_model(net, optimizer, scheduler, dataloader, device)
-        print(f"Loss per epoch: {epoch_loss}\n")
+        print(f"    Loss per epoch: {epoch_loss}\n")
 
         if sum(training_counts.values()) == 3:
             elapsed_time = time.time() - start_time
             minutes, seconds = divmod(elapsed_time, 60)
             perf = minutes + (seconds / 60)
-            print(f"Expected performance is {perf:.1f} minutes per epoch.\n")
+            print(f"    Expected performance is {perf:.1f} minutes per epoch.\n")
         # Increment the corresponding training count
         training_counts[key] += 1
 
         # Saves model every save_frq iterations or during the last one
-        if (epoch + 1) % SAVE_FRQ == 0 or epoch + 1 == len(epochs):
+        if sum(training_counts.values()) % SAVE_FRQ == 0 or index + 1 == len(epochs):
             # in ONNX format! ^_^ UwU
             save_model_as_onnx(net, device, sum(training_counts.values()))
 
         # Saves checkpoint every check_frq epochs or during the last one
-        if (epoch + 1) % CHECK_FRQ == 0 or epoch + 1 == len(epochs):
+        if sum(training_counts.values()) % CHECK_FRQ == 0 or index + 1 == len(epochs):
             save_checkpoint(
                 {
                     "epoch_count": epoch + 1,
@@ -331,8 +338,7 @@ def train_epochs(
                     "training_counts": training_counts,
                 }
             )
-            if epoch + 1 < len(epochs):
-                print("Checkpoint made\n")
+            print("Checkpoint made\n")
 
     return net
 
