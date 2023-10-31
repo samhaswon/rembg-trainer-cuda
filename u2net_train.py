@@ -302,7 +302,7 @@ def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
         print(f"Loading checkpoint '{filename}'...")
     else:
         print(f"No checkpoint file found at '{filename}'. Starting from scratch...")
-    print("———")
+    print("\n———")
 
     return training_counts
 
