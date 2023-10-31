@@ -221,7 +221,9 @@ class ToTensorLab:
         # Convert to tensor
         image = tf.to_tensor(image)
         label = tf.to_tensor(label)
-        # This is where you apply half precision if needed!
+
+        if HALF_PRECISION:
+            image, label = image.half(), label.half()
 
         return {"image": image, "label": label}
 

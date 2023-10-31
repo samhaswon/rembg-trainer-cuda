@@ -27,7 +27,7 @@ from model import U2NET
 
 SAVE_FRQ = 0
 CHECK_FRQ = 0
-HALF_PRECISION = False  # does nothing at the moment!
+HALF_PRECISION = False  # not tested!!
 
 # Defining BCE Loss for Binary Cross Entropy
 bce_loss = nn.BCELoss(reduction="mean")
@@ -506,7 +506,10 @@ def main():
         print("Different amounts of images and masks, can't proceed mate")
         return
 
-    net = U2NET(3, 1)
+    if HALF_PRECISION:
+        net = U2NET(3, 1).half()
+    else:
+        net = U2NET(3, 1)
     net.to(device)
     net.train()
 
