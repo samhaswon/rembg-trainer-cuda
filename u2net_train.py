@@ -1,3 +1,7 @@
+"""
+This script trains a deep learning model on an image dataset using various augmentations like flips, rotations, and crops. 
+The model is intended to use with rembg for background removal.
+"""
 import os
 import argparse
 import glob
@@ -23,9 +27,12 @@ from model import U2NET
 
 SAVE_FRQ = 0
 CHECK_FRQ = 0
+HALF_PRECISION = False  # does nothing at the moment!
 
+# Defining BCE Loss for Binary Cross Entropy
 bce_loss = nn.BCELoss(reduction="mean")
 
+# Definition of different augmentations
 train_configs = {
     "plain_resized": {
         "name": "Plain Images",
@@ -67,12 +74,23 @@ train_configs = {
         "name": "Different crops",
         "message": "Augmenting dataset with different crops...\n",
         "transform": [Resize(2304), RandomCrop(256, 3), ToTensorLab()],
-        "batch_factor": 4,  # because they are smaller => we can fit more in memory
+        "batch_factor": 4,  # same here
     },
 }
 
 
 def dice_loss(pred, target, smooth=1.0):
+    """
+    Calculates the Dice Loss.
+
+    Parameters:
+        pred (Tensor): Predicted output.
+        target (Tensor): Ground truth/target output.
+        smooth (float, optional): A smoothing factor to prevent division by zero. Defaults to 1.0.
+
+    Returns:
+        float: Dice Loss value.
+    """
     pred = pred.contiguous()
     target = target.contiguous()
 
@@ -87,6 +105,12 @@ def dice_loss(pred, target, smooth=1.0):
 
 
 def get_args():
+    """
+    Parses command-line arguments.
+
+    Returns:
+        argparse.Namespace: Parsed arguments.
+    """
     parser = argparse.ArgumentParser(
         description="A program that trains ONNX model for use with rembg"
     )
@@ -180,6 +204,12 @@ def get_args():
 
 
 def get_device():
+    """
+    Determines the device to run the model on (GPU/CPU).
+
+    Returns:
+        torch.device: Device type ('cuda:0', 'mps', or 'cpu').
+    """
     if torch.cuda.is_available():
         print("NVIDIA CUDA acceleration enabled")
         torch.multiprocessing.set_start_method("spawn")
@@ -194,6 +224,15 @@ def get_device():
 
 
 def save_model_as_onnx(model, device, ite_num, input_tensor_size=(1, 3, 320, 320)):
+    """
+    Saves the model in ONNX format.
+
+    Parameters:
+        model (nn.Module): The trained model.
+        device (torch.device): The device where the model is located.
+        ite_num (int): Amount of epochs already done.
+        input_tensor_size (tuple, optional): The size of the input tensor. Defaults to (1, 3, 320, 320).
+    """
     x = torch.randn(*input_tensor_size, requires_grad=True)
     x = x.to(device)
 
@@ -214,10 +253,28 @@ def save_model_as_onnx(model, device, ite_num, input_tensor_size=(1, 3, 320, 320
 
 
 def save_checkpoint(state, filename="saved_models/checkpoint.pth.tar"):
+    """
+    Saves the model's state as a checkpoint.
+
+    Parameters:
+        state (dict): State of the model to save.
+        filename (str, optional): Path to save the checkpoint. Defaults to "saved_models/checkpoint.pth.tar".
+    """
     torch.save({"state": state}, filename)
 
 
 def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
+    """
+    Loads model state from a checkpoint.
+
+    Parameters:
+        net (nn.Module): Model architecture.
+        optimizer (Optimizer): Optimizer used during training.
+        filename (str, optional): Path to the checkpoint. Defaults to "saved_models/checkpoint.pth.tar".
+
+    Returns:
+        dict: Counts of training epochs for various augmentations.
+    """
     training_counts = {
         "plain_resized": 0,
         "flipped_v": 0,
@@ -249,13 +306,34 @@ def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
 
 
 def load_dataset(img_dir, lbl_dir, ext):
+    """
+    Loads image and mask filenames from given directories.
+
+    Parameters:
+        img_dir (str): Directory with images.
+        lbl_dir (str): Directory with masks.
+        ext (str): Extension of the image files (e.g., '.png').
+
+    Returns:
+        list, list: Lists of image and mask filenames.
+    """
     img_list = glob.glob(os.path.join(img_dir, "*" + ext))
     lbl_list = [os.path.join(lbl_dir, os.path.basename(img)) for img in img_list]
 
     return img_list, lbl_list
 
 
-def muti_bce_loss_fusion(d_list, labels_v):
+def muti_loss_fusion(d_list, labels_v):
+    """
+    Combines BCE and Dice losses. Gives more weight to dice loss.
+
+    Parameters:
+        d_list (list): List of predicted outputs.
+        labels_v (Tensor): Ground truth/target outputs.
+
+    Returns:
+        float: Combined loss value.
+    """
     bce_losses = [bce_loss(d, labels_v) for d in d_list]
     dice_losses = [dice_loss(d, labels_v) for d in d_list]
     w_bce, w_dice = 1 / 3, 2 / 3
@@ -268,6 +346,18 @@ def muti_bce_loss_fusion(d_list, labels_v):
 
 
 def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
+    """
+    Creates a DataLoader for the dataset.
+
+    Parameters:
+        tra_img_name_list (list): List of image filenames.
+        tra_lbl_name_list (list): List of mask filenames.
+        transform (transforms.Compose): Transformations to apply.
+        batch_size (int): Amount of tensors to load into memory at once.
+
+    Returns:
+        DataLoader: DataLoader object for the dataset.
+    """
     # Dataset with given transform
     salobj_dataset = SalObjDataset(
         img_name_list=tra_img_name_list,
@@ -288,6 +378,16 @@ def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
 
 
 def train_model(net, optimizer, scheduler, dataloader, device):
+    """
+    Trains the model for a single epoch.
+
+    Parameters:
+        net (nn.Module): Model architecture.
+        optimizer (Optimizer): Optimizer used during training.
+        scheduler (lr_scheduler): Learning rate scheduler.
+        dataloader (DataLoader): DataLoader for the dataset.
+        device (torch.device): Device to train on (e.g., GPU/CPU).
+    """
     epoch_loss = 0.0
 
     for i, data in enumerate(dataloader):
@@ -298,7 +398,7 @@ def train_model(net, optimizer, scheduler, dataloader, device):
 
         outputs = net(inputs)
 
-        combined_loss = muti_bce_loss_fusion(outputs, labels)
+        combined_loss = muti_loss_fusion(outputs, labels)
         combined_loss.backward()
         torch.nn.utils.clip_grad_norm_(
             net.parameters(), max_norm=1.0
@@ -317,6 +417,22 @@ def train_model(net, optimizer, scheduler, dataloader, device):
 def train_epochs(
     net, optimizer, scheduler, dataloader, device, epochs, training_counts, key
 ):
+    """
+    Train the model for given amount of epochs. Updates training counts.
+
+    Parameters:
+        net (nn.Module): The model architecture to be trained.
+        optimizer (Optimizer): The optimizer used during training.
+        scheduler (lr_scheduler): Scheduler to adjust the learning rate during training.
+        dataloader (DataLoader): DataLoader object supplying the training data.
+        device (torch.device): The device on which the training will take place (e.g., GPU/CPU).
+        epochs (int): Number of epochs for which the model will be trained.
+        training_counts (dict): Dictionary tracking the number of epochs trained for different configurations.
+        key (str): Key for the specific training configuration.
+
+    Returns:
+        nn.Module: Trained model.
+    """
     for index, epoch in enumerate(epochs):
         start_time = time.time()
 
@@ -354,6 +470,9 @@ def train_epochs(
 
 
 def main():
+    """
+    Main function for initiating training of the model on the dataset.
+    """
     device = get_device()
 
     args = get_args()
