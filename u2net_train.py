@@ -311,8 +311,8 @@ def train_epochs(
         if sum(training_counts.values()) == 3:
             elapsed_time = time.time() - start_time
             minutes, seconds = divmod(elapsed_time, 60)
-            print(f"Expected performance is {minutes:.1f} minutes seconds per epoch.\n")
-
+            perf = minutes + (seconds / 60)
+            print(f"Expected performance is {perf:.1f} minutes per epoch.\n")
         # Increment the corresponding training count
         training_counts[key] += 1
 
