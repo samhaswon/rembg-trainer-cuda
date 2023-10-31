@@ -186,13 +186,10 @@ def get_device():
 
 
 def save_model_as_onnx(model, device, ite_num, input_tensor_size=(1, 3, 320, 320)):
-    saved_models_dir = "saved_models"
-    if not os.path.exists(saved_models_dir):
-        os.makedirs(saved_models_dir)
     x = torch.randn(*input_tensor_size, requires_grad=True)
     x = x.to(device)
 
-    onnx_file_name = "{}/{}.onnx".format(saved_models_dir, ite_num)
+    onnx_file_name = "{}/{}.onnx".format("saved_models", ite_num)
     torch.onnx.export(
         model,
         x,
@@ -209,9 +206,6 @@ def save_model_as_onnx(model, device, ite_num, input_tensor_size=(1, 3, 320, 320
 
 
 def save_checkpoint(state, filename="saved_models/checkpoint.pth.tar"):
-    directory = os.path.dirname(filename)
-    if not os.path.exists(directory):
-        os.makedirs(directory)
     torch.save({"state": state}, filename)
 
 
@@ -363,6 +357,9 @@ def main():
         "crops": args.rand,
         "crops_loyal": args.loyal,
     }
+
+    if not os.path.exists("saved_models"):
+        os.makedirs("saved_models")
 
     tra_img_name_list, tra_lbl_name_list = load_dataset(
         tra_image_dir, tra_label_dir, ".png"
