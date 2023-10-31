@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
+from torchvision.transforms import transforms
 
 from data_loader import *
 from model import U2NET
@@ -21,37 +22,43 @@ train_configs = {
     "plain_resized": {
         "name": "Plain Images",
         "message": "Learning the dataset itself...",
-        "transform": [Resize(512), ToTensorLab(flag=0)],
+        "transform": [Resize(512), ToTensorLab()],
         "batch_factor": 1,
     },
     "flipped_v": {
         "name": "Vertical Flips",
         "message": "Learning the vertical flips of dataset images...",
-        "transform": [Resize(512), VerticalFlip(), ToTensorLab(flag=0)],
+        "transform": [Resize(512), VerticalFlip(), ToTensorLab()],
         "batch_factor": 1,
     },
     "flipped_h": {
         "name": "Horizontal Flips",
         "message": "Learning the horizontal flips of dataset images...",
-        "transform": [Resize(512), HorizontalFlip(), ToTensorLab(flag=0)],
+        "transform": [Resize(512), HorizontalFlip(), ToTensorLab()],
         "batch_factor": 1,
     },
     "rotated_l": {
         "name": "Left Rotations",
         "message": "Learning the left rotations of dataset images...",
-        "transform": [Resize(512), Rotation(90), ToTensorLab(flag=0)],
+        "transform": [Resize(512), Rotation(90), ToTensorLab()],
         "batch_factor": 1,
     },
     "rotated_r": {
         "name": "Right Rotations",
         "message": "Learning the right rotation of dataset images...",
-        "transform": [Resize(512), Rotation(270), ToTensorLab(flag=0)],
+        "transform": [Resize(512), Rotation(270), ToTensorLab()],
         "batch_factor": 1,
     },
-    "random_crops": {
-        "name": "Random Crops",
+    "crops": {
+        "name": "256px Crops",
         "message": "Augmenting dataset with random crops...",
-        "transform": [Resize(2304), RandomCrop(256), ToTensorLab(flag=0)],
+        "transform": [Resize(2304), RandomCrop(256, 0), ToTensorLab()],
+        "batch_factor": 4,  # because they are smaller => we can fit more in memory
+    },
+    "crops_loyal": {
+        "name": "Different crops",
+        "message": "Augmenting dataset with different crops...",
+        "transform": [Resize(2304), RandomCrop(256, 3), ToTensorLab()],
         "batch_factor": 4,  # because they are smaller => we can fit more in memory
     },
 }
@@ -116,42 +123,49 @@ def get_args():
         "--plain_resized",
         type=int,
         default=5,
-        help="Number of training epochs for plain_resized target.",
+        help="Number of training epochs for plain_resized.",
     )
     parser.add_argument(
         "-vf",
         "--vflipped",
         type=int,
         default=2,
-        help="Number of training epochs for flipped_v target.",
+        help="Number of training epochs for flipped_v.",
     )
     parser.add_argument(
         "-hf",
         "--hflipped",
         type=int,
         default=2,
-        help="Number of training epochs for flipped_h target.",
+        help="Number of training epochs for flipped_h.",
     )
     parser.add_argument(
         "-left",
         "--rotated_l",
         type=int,
         default=2,
-        help="Number of training epochs for rotated_l target.",
+        help="Number of training epochs for rotated_l.",
     )
     parser.add_argument(
         "-right",
         "--rotated_r",
         type=int,
         default=2,
-        help="Number of training epochs for rotated_r target.",
+        help="Number of training epochs for rotated_r.",
     )
     parser.add_argument(
         "-r",
         "--rand",
         type=int,
         default=20,
-        help="Number of training epochs for random_crops target.",
+        help="Number of training epochs for 256px crops.",
+    )
+    parser.add_argument(
+        "-l",
+        "--loyal",
+        type=int,
+        default=7,
+        help="Number of training epochs for different 256px crops.",
     )
 
     return parser.parse_args()
@@ -211,7 +225,8 @@ def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
             "flipped_h": 0,
             "rotated_l": 0,
             "rotated_r": 0,
-            "random_crops": 0,
+            "crops": 0,
+            "crops_loyal": 0,
         }
 
 
@@ -274,16 +289,10 @@ def train_model(net, optimizer, scheduler, dataloader, device):
 
         epoch_loss += combined_loss.item()
 
-        if i < 9:
-            print(
-                f"  Iteration:  {i + 1}/{len(dataloader)}, "
-                f"loss per iteration: {epoch_loss / (i + 1)}"
-            )
-        else:
-            print(
-                f"  Iteration: {i + 1}/{len(dataloader)}, "
-                f"loss per iteration: {epoch_loss / (i + 1)}"
-            )
+        print(
+            f"  Iteration: {i + 1:4}/{len(dataloader)}, "
+            f"loss: {epoch_loss / (i + 1):.5f}"
+        )
 
     return epoch_loss
 
@@ -345,7 +354,8 @@ def main():
         "flipped_v": args.vflipped,
         "rotated_l": args.rotated_l,
         "rotated_r": args.rotated_r,
-        "random_crops": args.rand,
+        "crops": args.rand,
+        "crops_loyal": args.loyal,
     }
 
     tra_img_name_list, tra_lbl_name_list = load_dataset(
@@ -397,8 +407,6 @@ def main():
             train_type,
         )
 
-    # Configuration dictionary
-
     # Training loop
     for train_type, config in train_configs.items():
         if training_counts[train_type] < targets[train_type]:
@@ -409,10 +417,10 @@ def main():
             create_and_train(
                 transform, batch * config["batch_factor"], epochs, train_type
             )
+
             training_counts[train_type] = targets[train_type]
 
-    if sum(difference.values()) < 1:
-        print("Nothing left to do!")
+    print("Nothing left to do!")
 
 
 if __name__ == "__main__":

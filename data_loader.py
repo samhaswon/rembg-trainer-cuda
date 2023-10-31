@@ -1,23 +1,27 @@
 import gc
-import traceback
+import random
 
-import imageio
+import imageio.v3 as iio
 import numpy as np
-import torchvision.transforms as transforms
-import torchvision.transforms.functional as TF
+import torchvision.transforms.functional as tf
 from PIL import Image
 from torch.utils.data import Dataset
 
 
 class RandomCrop:
-    def __init__(self, output_size):
+    THRESHOLDS = [0.5, 0.8, 0.9, 0.95, 0.98, 0.99]
+    start_threshold_index = 0  # variable to keep track of the current threshold index
+
+    def __init__(self, output_size, index=0):
         assert isinstance(output_size, (int, tuple))
         if isinstance(output_size, int):
             self.output_size = (output_size, output_size)
         else:
             self.output_size = output_size
+        self.start_threshold_index = index
 
-    def _calculate_white_percentage(self, img):
+    @staticmethod
+    def _calculate_white_percentage(img):
         white_pixels = np.sum(img == 255)
         total_pixels = img.size
         return white_pixels / total_pixels
@@ -31,21 +35,15 @@ class RandomCrop:
         ]  # Assuming you want the grid to be of the same size as the crop
 
         cells = [(i, j) for i in range(0, w, grid_size) for j in range(0, h, grid_size)]
-        np.random.shuffle(cells)
+        random.shuffle(cells)
 
+        threshold_sequence = (RandomCrop.THRESHOLDS[RandomCrop.start_threshold_index:])
         try:
-            for threshold in [
-                0.5,
-                0.8,
-                0.9,
-                0.95,
-                0.98,
-                0.99,
-            ]:  # Gradually relax the white pixels constraint
+            for threshold in threshold_sequence:
                 for i, j in cells:
                     if i + self.output_size[0] <= w and j + self.output_size[1] <= h:
-                        cropped_image = TF.crop(image, i, j, *self.output_size)
-                        cropped_label = TF.crop(label, i, j, *self.output_size)
+                        cropped_image = tf.crop(image, i, j, *self.output_size)
+                        cropped_label = tf.crop(label, i, j, *self.output_size)
 
                         if (
                             self._calculate_white_percentage(np.array(cropped_image))
@@ -65,8 +63,8 @@ class HorizontalFlip:
         image, label = sample["image"], sample["label"]
 
         # Apply horizontal flip
-        image = TF.hflip(image)
-        label = TF.hflip(label)
+        image = tf.hflip(image)
+        label = tf.hflip(label)
 
         return {"image": image, "label": label}
 
@@ -76,8 +74,8 @@ class VerticalFlip:
         image, label = sample["image"], sample["label"]
 
         # Apply vertical flip
-        image = TF.vflip(image)
-        label = TF.vflip(label)
+        image = tf.vflip(image)
+        label = tf.vflip(label)
 
         return {"image": image, "label": label}
 
@@ -90,8 +88,8 @@ class Rotation:
         image, label = sample["image"], sample["label"]
 
         # Apply rotation
-        image = TF.rotate(image, self.degrees)
-        label = TF.rotate(label, self.degrees)
+        image = tf.rotate(image, self.degrees)
+        label = tf.rotate(label, self.degrees)
 
         return {"image": image, "label": label}
 
@@ -104,22 +102,19 @@ class Resize:
         image, label = sample["image"], sample["label"]
 
         # Resize both the image and label
-        image = TF.resize(image, [self.size, self.size])
-        label = TF.resize(label, [self.size, self.size])
+        image = tf.resize(image, [self.size, self.size])
+        label = tf.resize(label, [self.size, self.size])
 
         return {"image": image, "label": label}
 
 
 class ToTensorLab:
-    def __init__(self, flag=0):
-        self.flag = flag
-
     def __call__(self, sample):
         image, label = sample["image"], sample["label"]
 
         # Convert to tensor
-        image = TF.to_tensor(image)
-        label = TF.to_tensor(label)
+        image = tf.to_tensor(image)
+        label = tf.to_tensor(label)
 
         return {"image": image, "label": label}
 
@@ -134,8 +129,8 @@ class SalObjDataset(Dataset):
         return len(self.img_name_list)
 
     def __getitem__(self, idx):
-        image_array = imageio.imread(self.img_name_list[idx])
-        label_array = imageio.imread(self.lbl_name_list[idx])
+        image_array = iio.imread(self.img_name_list[idx])
+        label_array = iio.imread(self.lbl_name_list[idx])
 
         # Convert arrays to PIL images for compatibility with existing transforms
         image = Image.fromarray(image_array)
