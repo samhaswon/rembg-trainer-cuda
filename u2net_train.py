@@ -79,26 +79,26 @@ train_configs = {
 }
 
 
-def dice_loss(pred, target, smooth=1.0):
+def dice_loss(predict, target, smooth=1.0):
     """
     Calculates the Dice Loss.
 
     Parameters:
-        pred (Tensor): Predicted output.
+        predict (Tensor): Predicted output.
         target (Tensor): Ground truth/target output.
         smooth (float, optional): A smoothing factor to prevent division by zero. Defaults to 1.0.
 
     Returns:
         float: Dice Loss value.
     """
-    pred = pred.contiguous()
+    predict = predict.contiguous()
     target = target.contiguous()
 
-    intersection = (pred * target).sum(dim=2).sum(dim=2)
+    intersection = (predict * target).sum(dim=2).sum(dim=2)
 
     loss = 1 - (
         (2.0 * intersection + smooth)
-        / (pred.sum(dim=2).sum(dim=2) + target.sum(dim=2).sum(dim=2) + smooth)
+        / (predict.sum(dim=2).sum(dim=2) + target.sum(dim=2).sum(dim=2) + smooth)
     )
 
     return loss.mean()
@@ -323,7 +323,7 @@ def load_dataset(img_dir, lbl_dir, ext):
     return img_list, lbl_list
 
 
-def muti_loss_fusion(d_list, labels_v):
+def multi_loss_fusion(d_list, labels_v):
     """
     Combines BCE and Dice losses. Gives more weight to dice loss.
 
@@ -359,7 +359,7 @@ def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
         DataLoader: DataLoader object for the dataset.
     """
     # Dataset with given transform
-    salobj_dataset = SalObjDataset(
+    dataset = SalObjDataset(
         img_name_list=tra_img_name_list,
         lbl_name_list=tra_lbl_name_list,
         transform=transform,
@@ -370,11 +370,11 @@ def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
         cores = 2  # freeing up memory a bit
 
     # DataLoader for the dataset
-    salobj_dataloader = DataLoader(
-        salobj_dataset, batch_size=batch_size, shuffle=True, num_workers=cores
+    dataloader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=True, num_workers=cores
     )
 
-    return salobj_dataloader
+    return dataloader
 
 
 def train_model(net, optimizer, scheduler, dataloader, device):
@@ -398,7 +398,7 @@ def train_model(net, optimizer, scheduler, dataloader, device):
 
         outputs = net(inputs)
 
-        combined_loss = muti_loss_fusion(outputs, labels)
+        combined_loss = multi_loss_fusion(outputs, labels)
         combined_loss.backward()
         torch.nn.utils.clip_grad_norm_(
             net.parameters(), max_norm=1.0
@@ -426,7 +426,7 @@ def train_epochs(
         scheduler (lr_scheduler): Scheduler to adjust the learning rate during training.
         dataloader (DataLoader): DataLoader object supplying the training data.
         device (torch.device): The device on which the training will take place (e.g., GPU/CPU).
-        epochs (int): Number of epochs for which the model will be trained.
+        epochs (range): Number of epochs for which the model will be trained.
         training_counts (dict): Dictionary tracking the number of epochs trained for different configurations.
         key (str): Key for the specific training configuration.
 
