@@ -21,43 +21,43 @@ bce_loss = nn.BCELoss(reduction="mean")
 train_configs = {
     "plain_resized": {
         "name": "Plain Images",
-        "message": "Learning the dataset itself...",
+        "message": "Learning the dataset itself...\n",
         "transform": [Resize(512), ToTensorLab()],
         "batch_factor": 1,
     },
     "flipped_v": {
         "name": "Vertical Flips",
-        "message": "Learning the vertical flips of dataset images...",
+        "message": "Learning the vertical flips of dataset images...\n",
         "transform": [Resize(512), VerticalFlip(), ToTensorLab()],
         "batch_factor": 1,
     },
     "flipped_h": {
         "name": "Horizontal Flips",
-        "message": "Learning the horizontal flips of dataset images...",
+        "message": "Learning the horizontal flips of dataset images...\n",
         "transform": [Resize(512), HorizontalFlip(), ToTensorLab()],
         "batch_factor": 1,
     },
     "rotated_l": {
         "name": "Left Rotations",
-        "message": "Learning the left rotations of dataset images...",
+        "message": "Learning the left rotations of dataset images...\n",
         "transform": [Resize(512), Rotation(90), ToTensorLab()],
         "batch_factor": 1,
     },
     "rotated_r": {
         "name": "Right Rotations",
-        "message": "Learning the right rotation of dataset images...",
+        "message": "Learning the right rotation of dataset images...\n",
         "transform": [Resize(512), Rotation(270), ToTensorLab()],
         "batch_factor": 1,
     },
     "crops": {
         "name": "256px Crops",
-        "message": "Augmenting dataset with random crops...",
+        "message": "Augmenting dataset with random crops...\n",
         "transform": [Resize(2304), RandomCrop(256, 0), ToTensorLab()],
         "batch_factor": 4,  # because they are smaller => we can fit more in memory
     },
     "crops_loyal": {
         "name": "Different crops",
-        "message": "Augmenting dataset with different crops...",
+        "message": "Augmenting dataset with different crops...\n",
         "transform": [Resize(2304), RandomCrop(256, 3), ToTensorLab()],
         "batch_factor": 4,  # because they are smaller => we can fit more in memory
     },
@@ -235,6 +235,7 @@ def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
         print(f"Loading checkpoint '{filename}'...")
     else:
         print(f"No checkpoint file found at '{filename}'. Starting from scratch...")
+    print("———")
 
     return training_counts
 
@@ -371,9 +372,7 @@ def main():
         tra_image_dir, tra_label_dir, ".png"
     )
 
-    print(
-        "Images: {},".format(len(tra_img_name_list)), "masks:", len(tra_lbl_name_list)
-    )
+    print(f"Images: {format(len(tra_img_name_list))}, masks: {len(tra_lbl_name_list)}")
 
     if len(tra_img_name_list) != len(tra_lbl_name_list):
         print("Different amounts of images and masks, can't proceed mate")
@@ -389,14 +388,14 @@ def main():
 
     training_counts = load_checkpoint(net, optimizer)
     # dealing with negative values, if model was trained for more epochs than in target:
-    for key in training_counts:
-        if targets[key] < training_counts[key]:
-            targets[key] = training_counts[key]
+    for key, count in training_counts.items():
+        if targets[key] < count:
+            targets[key] = count
         print(
-            f"Task: {train_configs[key]['name']:<17} Epochs done: {training_counts[key]}/{targets[key]}"
+            f"Task: {train_configs[key]['name']:<17} Epochs done: {count}/{targets[key]}"
         )
 
-    print("---\n")
+    print("———\n")
 
     scheduler = CosineAnnealingLR(optimizer, T_max=sum(targets.values()), eta_min=1e-6)
 
