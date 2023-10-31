@@ -27,6 +27,8 @@ from model import U2NET
 
 SAVE_FRQ = 0
 CHECK_FRQ = 0
+
+#: float16 if true, float32 if false
 HALF_PRECISION = False  # not tested!!
 
 # Defining BCE Loss for Binary Cross Entropy

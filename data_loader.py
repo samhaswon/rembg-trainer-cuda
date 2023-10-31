@@ -9,7 +9,6 @@ import numpy as np
 import torchvision.transforms.functional as tf
 from PIL import Image
 from torch.utils.data import Dataset
-from u2net_train import HALF_PRECISION
 
 
 class RandomCrop:
@@ -216,6 +215,8 @@ class ToTensorLab:
         Returns:
         - Dictionary containing the image and mask as tensors.
         """
+        from u2net_train import HALF_PRECISION
+
         image, label = sample["image"], sample["label"]
 
         # Convert to tensor
