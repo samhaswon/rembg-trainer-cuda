@@ -70,7 +70,7 @@ class RandomCrop:
 
         # looking for as non-empty cell as possible
         # lowering threshold of whiteness if none are found
-        threshold_sequence = RandomCrop.THRESHOLDS[RandomCrop.start_threshold_index :]
+        threshold_sequence = RandomCrop.THRESHOLDS[RandomCrop.start_threshold_index:]
         for threshold in threshold_sequence:
             for i, j in cells:
                 if i + self.output_size[0] <= w and j + self.output_size[1] <= h:

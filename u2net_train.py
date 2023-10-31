@@ -4,13 +4,21 @@ import glob
 import time
 
 import torch
-import torch.nn as nn
-import torch.optim as optim
+from torch import nn
+from torch import optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from torchvision.transforms import transforms
 
-from data_loader import *
+from data_loader import (
+    SalObjDataset,
+    RandomCrop,
+    Resize,
+    ToTensorLab,
+    VerticalFlip,
+    HorizontalFlip,
+    Rotation,
+)
 from model import U2NET
 
 SAVE_FRQ = 0
@@ -189,7 +197,7 @@ def save_model_as_onnx(model, device, ite_num, input_tensor_size=(1, 3, 320, 320
     x = torch.randn(*input_tensor_size, requires_grad=True)
     x = x.to(device)
 
-    onnx_file_name = "{}/{}.onnx".format("saved_models", ite_num)
+    onnx_file_name = f"saved_models/{ite_num}.onnx"
     torch.onnx.export(
         model,
         x,
@@ -228,7 +236,7 @@ def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
         # Update the dictionary with values from the checkpoint
         # Only updates keys that exist in both dictionaries
         # This is done for expandability in future
-        for key in training_counts.keys():
+        for key in training_counts:
             if key in checkpoint["state"]["training_counts"]:
                 training_counts[key] = checkpoint["state"]["training_counts"][key]
 
@@ -255,7 +263,8 @@ def muti_bce_loss_fusion(d_list, labels_v):
         w_bce * bce + w_dice * dice for bce, dice in zip(bce_losses, dice_losses)
     ]
     total_loss = sum(combined_losses)
-    return combined_losses[0], total_loss
+    # return combined_losses[0], total_loss
+    return total_loss
 
 
 def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
@@ -289,7 +298,7 @@ def train_model(net, optimizer, scheduler, dataloader, device):
 
         outputs = net(inputs)
 
-        first_output, combined_loss = muti_bce_loss_fusion(outputs, labels)
+        combined_loss = muti_bce_loss_fusion(outputs, labels)
         combined_loss.backward()
         torch.nn.utils.clip_grad_norm_(
             net.parameters(), max_norm=1.0

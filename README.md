@@ -2,21 +2,25 @@
 
 This code allows you to easily train U2-Net model in [ONNX](https://github.com/onnx/onnx) format to use with [rembg](https://github.com/danielgatis/rembg]) tool.
 
-This work is based off [U2Net](https://github.com/xuebinqin/U-2-Net) repo, which is under Apache license. The derivative work is loicensed under MIT; do as you please with it.
+This work is based off [U2Net](https://github.com/xuebinqin/U-2-Net) repo, which is under Apache licence. The derivative work is loicensed under MIT; do as you please with it.
 
-Default parameters are fine-tuned for maximum performance on systems with 32gb of processing memory, like the Apple M1 Pro. Adjust accordingly. 
+A couple of notes on performance:
 
-Computations are performed in float32. For CUDA, you can easily rewrite this code with half precision calculations for increased performance. Apex library can help you with that. 
+- Default parameters are fine-tuned for maximum performance on systems with 32gb of processing memory, like the Apple M1 Pro. Adjust accordingly.
+- Computations are performed in float32, because float16 support on Metal is a bit undercooked at the moment.
+- If this is your first time using CUDA on Windows, you'd have to install [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads).
+- For CUDA, you can easily rewrite this code with half precision calculations for increased performance. Apex library can help you with that; I don't have such plans at the moment.
+- For acceleration on AMD GPUs, please refer to installation guide of [AMD ROCm platform](https://rocm.docs.amd.com/en/latest/how_to/pytorch_install/pytorch_install.html). No code changes will be required.
 
-If the training is interrupted for any reason, don't worry — the program saves its state regularly, allowing you to resume from where you left off.
+If the training is interrupted for any reason, don't worry — the program saves its state regularly, allowing you to resume from where you left off. Frequency of saving can be adjusted.
 
 ## Fancy a go?
 
-- Download latest release
+- Download the latest release
 - Install `requirements.txt`
 - Put your images into `images` folder
 - Put their masks into `masks` folder; or see [below](#mask-extraction)
-- Launch python3 u2net_train.py --help for more details on supported command line flags
+- Launch `python3 u2net_train.py --help` for more details on supported command line flags
 - Launch script with your desired configuration
 - Go grab yourself a [nice latte](https://www.youtube.com/shorts/h75W1uhL-iQ) and wait........... and wait.....
 - Once you've had your fill of waiting, here's how you use resulting model with rembg:
