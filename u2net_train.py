@@ -40,43 +40,43 @@ train_configs = {
         "name": "Plain Images",
         "message": "Learning the dataset itself...\n",
         "transform": [Resize(1024), ToTensorLab()],
-        "batch_factor": 0.3,
+        "batch_factor": 1,
     },
     "flipped_v": {
         "name": "Vertical Flips",
         "message": "Learning the vertical flips of dataset images...\n",
         "transform": [Resize(512), VerticalFlip(), ToTensorLab()],
-        "batch_factor": 1,
+        "batch_factor": 4,
     },
     "flipped_h": {
         "name": "Horizontal Flips",
         "message": "Learning the horizontal flips of dataset images...\n",
         "transform": [Resize(512), HorizontalFlip(), ToTensorLab()],
-        "batch_factor": 1,
+        "batch_factor": 4,
     },
     "rotated_l": {
         "name": "Left Rotations",
         "message": "Learning the left rotations of dataset images...\n",
         "transform": [Resize(512), Rotation(90), ToTensorLab()],
-        "batch_factor": 1,
+        "batch_factor": 4,
     },
     "rotated_r": {
         "name": "Right Rotations",
         "message": "Learning the right rotation of dataset images...\n",
         "transform": [Resize(512), Rotation(270), ToTensorLab()],
-        "batch_factor": 1,
+        "batch_factor": 4,
     },
     "crops": {
         "name": "256px Crops",
         "message": "Augmenting dataset with random crops...\n",
         "transform": [Resize(2304), RandomCrop(256, 0), ToTensorLab()],
-        "batch_factor": 4,  # because they are smaller => we can fit more in memory
+        "batch_factor": 16,  # because they are smaller => we can fit more in memory
     },
     "crops_loyal": {
         "name": "Different crops",
         "message": "Augmenting dataset with different crops...\n",
         "transform": [Resize(2304), RandomCrop(256, 3), ToTensorLab()],
-        "batch_factor": 4,  # same here
+        "batch_factor": 16,  # same here
     },
 }
 
@@ -149,8 +149,8 @@ def get_args():
         "-b",
         "--batch",
         type=int,
-        default=10,
-        help="Size of a single batch loaded into memory. Set to amount of processing memory in gigabytes divided by 3.",
+        default=3,
+        help="Size of a single batch loaded into memory. 1 is lowest possible; it may run on 8gb GPUs but also may not. 3 works well on 32gb of shared memory.",
     )
     parser.add_argument(
         "-p",
@@ -371,7 +371,7 @@ def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
 
     # DataLoader for the dataset
     dataloader = DataLoader(
-        dataset, batch_size=int(batch_size), shuffle=True, num_workers=cores
+        dataset, batch_size=max(1, int(batch_size)), shuffle=True, num_workers=cores
     )
 
     return dataloader
