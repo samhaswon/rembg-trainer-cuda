@@ -270,7 +270,8 @@ class SalObjDataset(Dataset):
 
         # Convert arrays to PIL images for compatibility with existing transforms
         image = Image.fromarray(image_array)
-        label = Image.fromarray(label_array)
+        label = Image.fromarray(label_array).convert("L")  # Convert RGB to grayscale
+        #     label = Image.fromarray(label_array)
 
         # Clean up memory
         del image_array, label_array
