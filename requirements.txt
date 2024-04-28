@@ -2,5 +2,5 @@ torch
 torchvision
 numpy
 Pillow
-imageio
 onnx
+bitsandbytes
