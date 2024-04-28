@@ -264,18 +264,10 @@ class SalObjDataset(Dataset):
         Returns:
         - Dictionary containing an image and its label.
         """
-        # Read the images
-        image_array = iio.imread(self.img_name_list[idx])
-        label_array = iio.imread(self.lbl_name_list[idx])
 
-        # Convert arrays to PIL images for compatibility with existing transforms
-        image = Image.fromarray(image_array)
-        label = Image.fromarray(label_array).convert("L")  # Convert RGB to grayscale
-        # TODO add a check here if it even needs to be converted, to increase perf
-
-        # Clean up memory
-        del image_array, label_array
-        gc.collect()
+        # Load images and masks as PIL images for compatibility with transforms
+        image = Image.open(self.img_name_list[idx]).convert('RGB')
+        label = Image.open(self.lbl_name_list[idx]).convert('L')
 
         sample = {"image": image, "label": label}
 

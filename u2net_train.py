@@ -4,9 +4,10 @@ The model is intended to use with rembg for background removal.
 """
 import os
 import argparse
-import glob
 import time
 
+import bitsandbytes as bnb
+import sys
 import torch
 from torch import nn
 from torch import optim
@@ -27,44 +28,45 @@ from model import U2NET
 
 SAVE_FRQ = 0
 CHECK_FRQ = 0
+MAIN_SIZE = 1024
 
 #: float16 if true, float32 if false
 HALF_PRECISION = False  # not tested!!
 
 # Defining BCE Loss for Binary Cross Entropy
-bce_loss = nn.BCELoss(reduction="mean")
+bce_loss = nn.BCEWithLogitsLoss(reduction="mean")
 
 # Definition of different augmentations
 train_configs = {
     "plain_resized": {
         "name": "Plain Images",
         "message": "Learning the dataset itself...\n",
-        "transform": [Resize(1024), ToTensorLab()],
+        "transform": [Resize(MAIN_SIZE), ToTensorLab()],
         "batch_factor": 1,
     },
     "flipped_v": {
         "name": "Vertical Flips",
         "message": "Learning the vertical flips of dataset images...\n",
-        "transform": [Resize(512), VerticalFlip(), ToTensorLab()],
-        "batch_factor": 4,
+        "transform": [Resize(MAIN_SIZE), VerticalFlip(), ToTensorLab()],
+        "batch_factor": 1,
     },
     "flipped_h": {
         "name": "Horizontal Flips",
         "message": "Learning the horizontal flips of dataset images...\n",
-        "transform": [Resize(512), HorizontalFlip(), ToTensorLab()],
-        "batch_factor": 4,
+        "transform": [Resize(MAIN_SIZE), HorizontalFlip(), ToTensorLab()],
+        "batch_factor": 1,
     },
     "rotated_l": {
         "name": "Left Rotations",
         "message": "Learning the left rotations of dataset images...\n",
-        "transform": [Resize(512), Rotation(90), ToTensorLab()],
-        "batch_factor": 4,
+        "transform": [Resize(MAIN_SIZE), Rotation(90), ToTensorLab()],
+        "batch_factor": 1,
     },
     "rotated_r": {
         "name": "Right Rotations",
         "message": "Learning the right rotation of dataset images...\n",
-        "transform": [Resize(512), Rotation(270), ToTensorLab()],
-        "batch_factor": 4,
+        "transform": [Resize(MAIN_SIZE), Rotation(270), ToTensorLab()],
+        "batch_factor": 1,
     },
     "crops": {
         "name": "256px Crops",
@@ -210,12 +212,12 @@ def get_device():
     Determines the device to run the model on (GPU/CPU).
 
     Returns:
-        torch.device: Device type ('cuda:0', 'mps', or 'cpu').
+        torch.device: Device type ('cuda', 'mps', or 'cpu').
     """
     if torch.cuda.is_available():
         print("NVIDIA CUDA acceleration enabled")
         torch.multiprocessing.set_start_method("spawn")
-        return torch.device("cuda:0")
+        return torch.device("cuda")
     elif torch.backends.mps.is_available():
         print("Apple Metal Performance Shaders acceleration enabled")
         torch.multiprocessing.set_start_method("fork")
@@ -225,7 +227,7 @@ def get_device():
         return torch.device("cpu")
 
 
-def save_model_as_onnx(model, device, ite_num, input_tensor_size=(1, 3, 320, 320)):
+def save_model_as_onnx(model, device, ite_num, input_tensor_size=(1, 3, MAIN_SIZE, MAIN_SIZE)):
     """
     Saves the model in ONNX format.
 
@@ -265,7 +267,7 @@ def save_checkpoint(state, filename="saved_models/checkpoint.pth.tar"):
     torch.save({"state": state}, filename)
 
 
-def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
+def load_checkpoint(net, optimizer, scaler, filename="saved_models/checkpoint.pth.tar"):
     """
     Loads model state from a checkpoint.
 
@@ -291,6 +293,7 @@ def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
         checkpoint = torch.load(filename)
         net.load_state_dict(checkpoint["state"]["state_dict"])
         optimizer.load_state_dict(checkpoint["state"]["optimizer"])
+        scaler.load_state_dict(checkpoint["state"]["scaler"])
 
         # Update the dictionary with values from the checkpoint
         # Only updates keys that exist in both dictionaries
@@ -319,8 +322,8 @@ def load_dataset(img_dir, lbl_dir, ext):
     Returns:
         list, list: Lists of image and mask filenames.
     """
-    img_list = glob.glob(os.path.join(img_dir, "*" + ext))
-    lbl_list = [os.path.join(lbl_dir, os.path.basename(img)) for img in img_list]
+    img_list = [img_dir + os.path.sep + x for x in os.listdir(img_dir)]
+    lbl_list = [lbl_dir + os.path.sep + x for x in os.listdir(lbl_dir)]
 
     return img_list, lbl_list
 
@@ -377,7 +380,7 @@ def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
     return dataloader
 
 
-def train_model(net, optimizer, scheduler, dataloader, device):
+def train_model(net, optimizer, scheduler, dataloader, device, scaler):
     """
     Trains the model for a single epoch.
 
@@ -387,23 +390,30 @@ def train_model(net, optimizer, scheduler, dataloader, device):
         scheduler (lr_scheduler): Learning rate scheduler.
         dataloader (DataLoader): DataLoader for the dataset.
         device (torch.device): Device to train on (e.g., GPU/CPU).
+        scaler:
     """
     epoch_loss = 0.0
 
+    print(" ")
     for i, data in enumerate(dataloader):
+        sys.stdout.write("\033[F")
         print(f"        Iteration: {i + 1:4}/{len(dataloader)}, ", end="")
         inputs = data["image"].to(device)
         labels = data["label"].to(device)
         optimizer.zero_grad()
 
-        outputs = net(inputs)
+        with torch.autocast(device_type=device.__str__(), dtype=torch.float16):
 
-        combined_loss = multi_loss_fusion(outputs, labels)
-        combined_loss.backward()
+            outputs = net(inputs)
+
+            combined_loss = multi_loss_fusion(outputs, labels)
+
+        scaler.scale(combined_loss).backward()
         torch.nn.utils.clip_grad_norm_(
             net.parameters(), max_norm=1.0
         )  # Clip gradients if their norm exceeds 1
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
         optimizer.zero_grad()
         scheduler.step()
 
@@ -415,7 +425,7 @@ def train_model(net, optimizer, scheduler, dataloader, device):
 
 
 def train_epochs(
-    net, optimizer, scheduler, dataloader, device, epochs, training_counts, key
+    net, optimizer, scheduler, dataloader, device, epochs, training_counts, key, train_count, train_target, scaler
 ):
     """
     Train the model for given amount of epochs. Updates training counts.
@@ -438,7 +448,7 @@ def train_epochs(
 
         # this is where the training occurs!
         print(f"    Epoch: {epoch + 1}/{epochs[-1] + 1}")
-        epoch_loss = train_model(net, optimizer, scheduler, dataloader, device)
+        epoch_loss = train_model(net, optimizer, scheduler, dataloader, device, scaler)
         print(f"    Loss per epoch: {epoch_loss}\n")
 
         if sum(training_counts.values()) == 3:
@@ -455,13 +465,15 @@ def train_epochs(
             save_model_as_onnx(net, device, sum(training_counts.values()))
 
         # Saves checkpoint every check_frq epochs or during the last one
-        if sum(training_counts.values()) % CHECK_FRQ == 0 or index + 1 == len(epochs):
+        # if sum(training_counts.values()) % CHECK_FRQ == 0 or index + 1 == len(epochs):
+        if train_count % CHECK_FRQ == 0 or train_count + 1 == train_target:
             save_checkpoint(
                 {
                     "epoch_count": epoch + 1,
                     "state_dict": net.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "training_counts": training_counts,
+                    "scaler": scaler.state_dict(),
                 }
             )
             print("Checkpoint made\n")
@@ -497,7 +509,7 @@ def main():
         os.makedirs("saved_models")
 
     tra_img_name_list, tra_lbl_name_list = load_dataset(
-        tra_image_dir, tra_label_dir, ".png"
+        tra_image_dir, tra_label_dir, ".*"
     )
 
     print(f"Images: {format(len(tra_img_name_list))}, masks: {len(tra_lbl_name_list)}")
@@ -513,11 +525,13 @@ def main():
     net.to(device)
     net.train()
 
-    optimizer = optim.Adam(
+    optimizer = bnb.optim.AdamW8bit(
         net.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0
     )
 
-    training_counts = load_checkpoint(net, optimizer)
+    grad_scaler = torch.cuda.amp.GradScaler()
+
+    training_counts = load_checkpoint(net, optimizer, grad_scaler)
     # dealing with negative values, if model was trained for more epochs than in target:
     for key, count in training_counts.items():
         if targets[key] < count:
@@ -530,7 +544,7 @@ def main():
 
     scheduler = CosineAnnealingLR(optimizer, T_max=sum(targets.values()), eta_min=1e-6)
 
-    def create_and_train(transform, batch_size, epochs, train_type):
+    def create_and_train(transform, batch_size, epochs, train_type, train_count, train_target):
         """Creates a dataloader and trains the network using the given parameters."""
         dataloader = get_dataloader(
             tra_img_name_list, tra_lbl_name_list, transform, batch_size
@@ -544,20 +558,39 @@ def main():
             epochs,
             training_counts,
             train_type,
+            train_count,
+            train_target,
+            grad_scaler
         )
 
-    # Training loop
-    for train_type, config in train_configs.items():
-        if training_counts[train_type] < targets[train_type]:
-            print(config["message"])
-            epochs = range(training_counts[train_type], targets[train_type])
-            transform = transforms.Compose(config["transform"])
+    complete = {
+        "plain_resized": False,
+        "flipped_h": False,
+        "flipped_v": False,
+        "rotated_l": False,
+        "rotated_r": False,
+        "crops": False,
+        "crops_loyal": False,
+    }
 
-            create_and_train(
-                transform, batch * config["batch_factor"], epochs, train_type
-            )
+    while not all(list(complete.values())):
+        # Training loop
+        for train_type, config in train_configs.items():
+            if training_counts[train_type] < targets[train_type]:
+                print(config["message"])
+                # epochs = range(training_counts[train_type], targets[train_type])
+                transform = transforms.Compose(config["transform"])
 
-            training_counts[train_type] = targets[train_type]
+                create_and_train(
+                    transform, batch * config["batch_factor"], range(1), train_type,
+                    training_counts[train_type], targets[train_type]
+                )
+
+                # training_counts[train_type] = targets[train_type]
+                training_counts[train_type] += 1
+            else:
+                print(f"Completed {train_type}")
+                complete[train_type] = True
 
     print("Nothing left to do!")
 
