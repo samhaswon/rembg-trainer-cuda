@@ -85,4 +85,4 @@ So, at the end of the day, you will end up with the following folder structure:
 
 Buy the original author ~~a coffee~~ an alcohol-free cider [here](http://buymeacoffee.com/jonathunky)
 
-If my modifications were particularly useful, you can send me so coin [here](https://paypal.me/SamuelH0725)
+If my modifications were particularly useful, you can send me some coin [here](https://paypal.me/SamuelH0725)
