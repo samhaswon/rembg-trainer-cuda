@@ -24,11 +24,14 @@ from data_loader import (
     HorizontalFlip,
     Rotation,
 )
-from model import U2NET
+from model import U2NET, U2NETP
 
 SAVE_FRQ = 0
 CHECK_FRQ = 0
 MAIN_SIZE = 1024
+IN_CHANNELS = 3
+OUT_CHANNELS = 2
+TRAIN_UNETP = False
 
 #: float16 if true, float32 if false
 HALF_PRECISION = False  # not tested!!
@@ -87,10 +90,6 @@ def dice_loss(predict, target, smooth=1.0):
     """
     Calculates the Dice Loss.
 
-    Parameters:
-        predict (Tensor): Predicted output.
-        target (Tensor): Ground truth/target output.
-        smooth (float, optional): A smoothing factor to prevent division by zero. Defaults to 1.0.
 
     Returns:
         float: Dice Loss value.
@@ -227,7 +226,7 @@ def get_device():
         return torch.device("cpu")
 
 
-def save_model_as_onnx(model, device, ite_num, input_tensor_size=(1, 3, MAIN_SIZE, MAIN_SIZE)):
+def save_model_as_onnx(model, device, ite_num, input_tensor_size=(1, IN_CHANNELS, MAIN_SIZE, MAIN_SIZE)):
     """
     Saves the model in ONNX format.
 
@@ -370,7 +369,7 @@ def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
         transform=transform,
     )
 
-    cores = 2  # freeing up memory a bit
+    cores = 4  # freeing up memory a bit
 
     # DataLoader for the dataset
     dataloader = DataLoader(
@@ -403,15 +402,13 @@ def train_model(net, optimizer, scheduler, dataloader, device, scaler):
         optimizer.zero_grad()
 
         with torch.autocast(device_type=device.__str__(), dtype=torch.float16):
-
             outputs = net(inputs)
-
             combined_loss = multi_loss_fusion(outputs, labels)
 
         scaler.scale(combined_loss).backward()
-        torch.nn.utils.clip_grad_norm_(
+        """torch.nn.utils.clip_grad_norm_(
             net.parameters(), max_norm=1.0
-        )  # Clip gradients if their norm exceeds 1
+        )  # Clip gradients if their norm exceeds 1"""
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad()
@@ -518,10 +515,16 @@ def main():
         print("Different amounts of images and masks, can't proceed mate")
         return
 
-    if HALF_PRECISION:
-        net = U2NET(3, 1).half()
+    if TRAIN_UNETP:
+        if HALF_PRECISION:
+            net = U2NETP(IN_CHANNELS, OUT_CHANNELS).half()
+        else:
+            net = U2NETP(IN_CHANNELS, OUT_CHANNELS)
     else:
-        net = U2NET(3, 1)
+        if HALF_PRECISION:
+            net = U2NET(IN_CHANNELS, OUT_CHANNELS).half()
+        else:
+            net = U2NET(IN_CHANNELS, OUT_CHANNELS)
     net.to(device)
     net.train()
 
@@ -587,7 +590,7 @@ def main():
                 )
 
                 # training_counts[train_type] = targets[train_type]
-                training_counts[train_type] += 1
+                # training_counts[train_type] += 1
             else:
                 print(f"Completed {train_type}")
                 complete[train_type] = True
