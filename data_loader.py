@@ -1,12 +1,11 @@
 """
 Helper code for loading and altering images in dataset
 """
-import gc
 import random
 
-import imageio.v3 as iio
+import torch
 import numpy as np
-import torchvision.transforms.functional as tf
+import torchvision.transforms.v2.functional as tf
 from PIL import Image
 from torch.utils.data import Dataset
 
@@ -204,7 +203,6 @@ class ToTensorLab:
     """
     A class to convert images from PIL format to PyTorch tensors.
     """
-
     def __call__(self, sample):
         """
         Convert the image and label from PIL format to PyTorch tensors.
@@ -220,8 +218,10 @@ class ToTensorLab:
         image, label = sample["image"], sample["label"]
 
         # Convert to tensor
-        image = tf.to_tensor(image)
-        label = tf.to_tensor(label)
+        image = tf.to_image(image)
+        image = tf.to_dtype(image, dtype=torch.float32, scale=True)
+        label = tf.to_image(label)
+        label = tf.to_dtype(label, dtype=torch.float32, scale=True)
 
         if HALF_PRECISION:
             image, label = image.half(), label.half()
@@ -265,7 +265,7 @@ class SalObjDataset(Dataset):
         - Dictionary containing an image and its label.
         """
 
-        # Load images and masks as PIL images for compatibility with transforms
+        # Load images from the appropriate files
         image = Image.open(self.img_name_list[idx]).convert('RGB')
         label = Image.open(self.lbl_name_list[idx]).convert('L')
 
