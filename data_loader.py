@@ -58,7 +58,7 @@ class RandomCrop:
         Returns:
         - Dictionary containing the random crop of image and mask.
         """
-        image, label = sample["image"], sample["label"]
+        image, label, mask = sample["image"], sample["label"], sample["mask"]
 
         w, h = image.size
         grid_size = self.output_size[0]
@@ -75,12 +75,13 @@ class RandomCrop:
                 if i + self.output_size[0] <= w and j + self.output_size[1] <= h:
                     cropped_image = tf.crop(image, i, j, *self.output_size)
                     cropped_label = tf.crop(label, i, j, *self.output_size)
+                    cropped_mask = tf.crop(mask, i, j, *self.output_size)
 
                     if (
                         self._calculate_white_percentage(np.array(cropped_image))
                         <= threshold
                     ):
-                        return {"image": cropped_image, "label": cropped_label}
+                        return {"image": cropped_image, "label": cropped_label, "mask": cropped_mask}
 
         raise ValueError("Fully white image is given :(")
 
@@ -100,13 +101,14 @@ class HorizontalFlip:
         Returns:
         - Dictionary containing the horizontally flipped image and mask.
         """
-        image, label = sample["image"], sample["label"]
+        image, label, mask = sample["image"], sample["label"], sample["mask"]
 
         # Apply horizontal flip
         image = tf.hflip(image)
         label = tf.hflip(label)
+        mask = tf.hflip(mask)
 
-        return {"image": image, "label": label}
+        return {"image": image, "label": label, "mask": mask}
 
 
 class VerticalFlip:
@@ -124,13 +126,14 @@ class VerticalFlip:
         Returns:
         - Dictionary containing the vertically flipped image and mask.
         """
-        image, label = sample["image"], sample["label"]
+        image, label, mask = sample["image"], sample["label"], sample["mask"]
 
         # Apply vertical flip
         image = tf.vflip(image)
         label = tf.vflip(label)
+        mask = tf.vflip(mask)
 
-        return {"image": image, "label": label}
+        return {"image": image, "label": label, "mask": mask}
 
 
 class Rotation:
@@ -157,13 +160,14 @@ class Rotation:
         Returns:
         - Dictionary containing the rotated image and mask.
         """
-        image, label = sample["image"], sample["label"]
+        image, label, mask = sample["image"], sample["label"], sample["mask"]
 
         # Apply rotation
         image = tf.rotate(image, self.degrees)
         label = tf.rotate(label, self.degrees)
+        mask = tf.rotate(mask, self.degrees)
 
-        return {"image": image, "label": label}
+        return {"image": image, "label": label, "mask": mask}
 
 
 class Resize:
@@ -190,13 +194,14 @@ class Resize:
         Returns:
         - Dictionary containing the resized image and mask.
         """
-        image, label = sample["image"], sample["label"]
+        image, label, mask = sample["image"], sample["label"], sample["mask"]
 
         # Resize both the image and label
         image = tf.resize(image, [self.size, self.size])
         label = tf.resize(label, [self.size, self.size])
+        mask = tf.resize(mask, [self.size, self.size])
 
-        return {"image": image, "label": label}
+        return {"image": image, "label": label, "mask": mask}
 
 
 class ToTensorLab:
@@ -215,18 +220,20 @@ class ToTensorLab:
         """
         from u2net_train import HALF_PRECISION
 
-        image, label = sample["image"], sample["label"]
+        image, label, mask = sample["image"], sample["label"], sample["mask"]
 
         # Convert to tensor
         image = tf.to_image(image)
         image = tf.to_dtype(image, dtype=torch.float32, scale=True)
         label = tf.to_image(label)
         label = tf.to_dtype(label, dtype=torch.float32, scale=True)
+        mask = tf.to_image(mask)
+        mask = tf.to_dtype(mask, dtype=torch.float32, scale=True)
 
         if HALF_PRECISION:
-            image, label = image.half(), label.half()
+            image, label, mask = image.half(), label.half(), mask.half()
 
-        return {"image": image, "label": label}
+        return {"image": image, "label": label, "mask": mask}
 
 
 class SalObjDataset(Dataset):
@@ -236,7 +243,7 @@ class SalObjDataset(Dataset):
     transformations before feeding them to the network.
     """
 
-    def __init__(self, img_name_list, lbl_name_list, transform=None):
+    def __init__(self, img_name_list, lbl_name_list, mask_name_list, transform=None):
         """
         Initialize the SalObjDataset.
 
@@ -247,6 +254,7 @@ class SalObjDataset(Dataset):
         """
         self.img_name_list = img_name_list
         self.lbl_name_list = lbl_name_list
+        self.mask_name_list = mask_name_list
         self.transform = transform
 
     def __len__(self):
@@ -267,9 +275,10 @@ class SalObjDataset(Dataset):
 
         # Load images from the appropriate files
         image = Image.open(self.img_name_list[idx]).convert('RGB')
-        label = Image.open(self.lbl_name_list[idx]).convert('L')
+        label = Image.open(self.lbl_name_list[idx]).convert('LA')
+        mask = Image.open(self.mask_name_list[idx]).convert('L')
 
-        sample = {"image": image, "label": label}
+        sample = {"image": image, "label": label, "mask": mask}
 
         # Apply the transformations
         if self.transform:

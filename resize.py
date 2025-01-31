@@ -3,6 +3,7 @@ import multiprocessing
 import os
 from PIL import Image
 from typing import List
+from tqdm import tqdm
 
 
 def resize_and_convert(image_list: List[str], size: int, color: str = "RGB"):
@@ -64,6 +65,10 @@ if __name__ == '__main__':
 
     img_list = [args.images + os.path.sep + x for x in os.listdir(args.images)]
     lbl_list = [args.masks + os.path.sep + x for x in os.listdir(args.masks)]
+    if os.path.isdir("./skin_masks"):
+        skin_mask_list = ["./skin_masks" + os.path.sep for x in os.listdir("./skin_masks")]
+    else:
+        skin_mask_list = []
 
     if len(img_list) != len(lbl_list):
         print(f"The number of images ({len(img_list)}) is not equal to the number of masks/results ({len(lbl_list)}). "
@@ -75,13 +80,26 @@ if __name__ == '__main__':
 
     split_images = [img_list[i:i+num_processes] for i in range(0, len(img_list), num_processes)]
     split_labels = [lbl_list[i:i+num_processes] for i in range(0, len(lbl_list), num_processes)]
+    split_skin_masks = [skin_mask_list[i:i+num_processes] for i in range(0, len(skin_mask_list), num_processes)]
+
+    progress_bar = tqdm(total=(len(split_images) + len(split_labels) + len(split_skin_masks)))
+
+
+    def update(*a):
+        """
+        Update the progress bar
+        """
+        progress_bar.update(1)
 
     for sub_list in split_images:
-        pool.apply_async(resize_and_convert, args=(sub_list, args.size, args.i_color,))
+        pool.apply_async(resize_and_convert, args=(sub_list, args.size, args.i_color,), callback=update)
     for sub_list in split_labels:
-        pool.apply_async(resize_and_convert, args=(sub_list, args.size, args.m_color,))
+        pool.apply_async(resize_and_convert, args=(sub_list, args.size, args.m_color,), callback=update)
+    for sub_list in split_skin_masks:
+        pool.apply_async(resize_and_convert, args=(sub_list, args.size, "L"), callback=update)
 
     # Start, do the work, and wait for results
     pool.close()
     pool.join()
+    progress_bar.close()
     print("Done")

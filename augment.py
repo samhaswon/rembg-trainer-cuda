@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import shutil
 from typing import Union
+from tqdm import tqdm
 
 augment_num = 0
 
@@ -38,8 +39,9 @@ def save_img(image_in: np.ndarray, filename: str) -> None:
     # Write the augmented image
     cv2.imwrite(f"./images/{image_name}", image_in)
 
-    # Copy the mask for the augmented image
+    # Copy the masks for the augmented image
     shutil.copy(f"./masks/{filename}", f"./masks/{image_name}")
+    shutil.copy(f"./skin_masks/{filename}", f"./skin_masks/{image_name}")
 
     # Increment the number for augmented images.
     augment_num += 1
@@ -113,8 +115,10 @@ if __name__ == "__main__":
     mask_list = [x for x in os.listdir("./masks")]
 
     print(f"Found {len(image_list)} images.")
+
+    progress_bar = tqdm(total=len(image_list))
     
-    augment_num = len(image_list) + 1
+    augment_num = max(len(image_list) + 1, int(image_list[-1][:-4]) + 1)
 
     for image_path, mask_path in zip(image_list, mask_list):
         image = cv2.imread(f"./images/{image_path}")
@@ -136,12 +140,16 @@ if __name__ == "__main__":
         save_img(desaturation(image, 1.5), filename=image_path)
 
         # Brightness and Contrast
-        save_img(contrast(image, alpha=1, beta=5), filename=image_path)
-        save_img(contrast(image, alpha=1.5, beta=0), filename=image_path)
-        save_img(contrast(image, alpha=0.7, beta=5), filename=image_path)
-        save_img(contrast(image, alpha=0.7, beta=0), filename=image_path)
-        save_img(contrast(image, alpha=1.5, beta=5), filename=image_path)
+        # save_img(contrast(image, alpha=1, beta=5), filename=image_path)
+        # save_img(contrast(image, alpha=1.5, beta=0), filename=image_path)
+        # save_img(contrast(image, alpha=0.7, beta=5), filename=image_path)
+        # save_img(contrast(image, alpha=0.7, beta=0), filename=image_path)
+        # save_img(contrast(image, alpha=1.5, beta=5), filename=image_path)
 
         # Sepia
         for i in range(0, 8):
             save_img(sepia(image, i * 0.25), filename=image_path)
+
+        progress_bar.update(1)
+
+    progress_bar.close()

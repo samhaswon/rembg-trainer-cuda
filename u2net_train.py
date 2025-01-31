@@ -7,9 +7,12 @@ import argparse
 import time
 
 import bitsandbytes as bnb
+import cv2
+import numpy as np
 import sys
 import torch
 from torch import nn
+import torch.nn.functional as F
 from torch import optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
@@ -24,7 +27,7 @@ from data_loader import (
     HorizontalFlip,
     Rotation,
 )
-from model import U2NET, U2NETP
+from model import U2NET, U2NETP, U2NETSoftplus
 
 SAVE_FRQ = 0
 CHECK_FRQ = 0
@@ -32,6 +35,7 @@ MAIN_SIZE = 1024
 IN_CHANNELS = 3
 OUT_CHANNELS = 2
 TRAIN_UNETP = False
+TRAIN_U2NET_SOFTPLUS = True
 
 #: float16 if true, float32 if false
 HALF_PRECISION = False  # not tested!!
@@ -100,11 +104,51 @@ def dice_loss(predict, target, smooth=1.0):
     intersection = (predict * target).sum(dim=2).sum(dim=2)
 
     loss = 1 - (
-        (2.0 * intersection + smooth)
-        / (predict.sum(dim=2).sum(dim=2) + target.sum(dim=2).sum(dim=2) + smooth)
+            (2.0 * intersection + smooth)
+            / (predict.sum(dim=2).sum(dim=2) + target.sum(dim=2).sum(dim=2) + smooth)
     )
 
     return loss.mean()
+
+
+def dilate_mask(mask, kernel_size=5):
+    """Dilate a batch of binary masks using OpenCV."""
+    batch_size = mask.shape[0]  # Get batch size
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+    dilated_masks = []
+
+    for i in range(batch_size):
+        mask_np = mask[i].detach().cpu().numpy().astype(np.uint8)  # Convert to NumPy
+        dilated = cv2.dilate(mask_np, kernel, iterations=1)  # Apply dilation
+        dilated_masks.append(torch.tensor(dilated, dtype=torch.float32, device=mask.device))  # Convert back to tensor
+
+    return torch.stack(dilated_masks)  # Stack to maintain batch shape
+
+
+def masked_loss(pred, target, mask, loss_fn):
+    """Applies a given loss function but only inside the masked region."""
+    loss = loss_fn(pred, target)
+    return (loss * mask).mean()  # Only compute loss in masked areas
+
+
+def custom_loss(pred, target, task2_mask, lambda_seg=1.0, lambda_grad=0.5, kernel_size=5):
+    """
+    Custom loss for Task 1, using Task 2 mask to condition segmentation loss
+    and dilated mask for gradient loss.
+    """
+    # Extract individual output channels
+    seg_pred, grad_pred = pred[:, 0, :, :], pred[:, 1, :, :]
+    seg_target, grad_target = target[:, 0, :, :], target[:, 1, :, :]
+
+    # Compute segmentation loss (masked by Task 2's mask)
+    seg_loss = masked_loss(seg_pred, seg_target, task2_mask, F.cross_entropy)
+
+    # Compute gradient loss (masked by dilated Task 1 segmentation)
+    dilated_mask = dilate_mask(seg_target, kernel_size)
+    grad_loss = masked_loss(grad_pred, grad_target, dilated_mask, F.l1_loss)
+
+    # Final loss combination
+    return lambda_seg * seg_loss + lambda_grad * grad_loss
 
 
 def get_args():
@@ -130,6 +174,13 @@ def get_args():
         "--tra_masks_dir",
         type=str,
         default="masks",
+        help="Directory with masks.",
+    )
+    parser.add_argument(
+        "-n",
+        "--tra_seg_masks_dir",
+        type=str,
+        default="skin_masks",
         help="Directory with masks.",
     )
     parser.add_argument(
@@ -309,7 +360,7 @@ def load_checkpoint(net, optimizer, scaler, filename="saved_models/checkpoint.pt
     return training_counts
 
 
-def load_dataset(img_dir, lbl_dir, ext):
+def load_dataset(img_dir, lbl_dir, mask_dir, ext):
     """
     Loads image and mask filenames from given directories.
 
@@ -323,33 +374,36 @@ def load_dataset(img_dir, lbl_dir, ext):
     """
     img_list = [img_dir + os.path.sep + x for x in os.listdir(img_dir)]
     lbl_list = [lbl_dir + os.path.sep + x for x in os.listdir(lbl_dir)]
+    mask_list = [mask_dir + os.path.sep + x for x in os.listdir(lbl_dir)]
 
-    return img_list, lbl_list
+    return img_list, lbl_list, mask_list
 
 
-def multi_loss_fusion(d_list, labels_v):
+def multi_loss_fusion(d_list, labels_v, masks):
     """
     Combines BCE and Dice losses. Gives more weight to dice loss.
 
     Parameters:
         d_list (list): List of predicted outputs.
         labels_v (Tensor): Ground truth/target outputs.
+        masks (Tensor): mask for loss calculations
 
     Returns:
         float: Combined loss value.
     """
     bce_losses = [bce_loss(d, labels_v) for d in d_list]
     dice_losses = [dice_loss(d, labels_v) for d in d_list]
-    w_bce, w_dice = 1 / 3, 2 / 3
+    custom_losses = [custom_loss(d, labels_v, masks) for d in d_list]
+    w_bce, w_dice, w_custom = (1 / 3) * 0.1, 2 / 3 * 0.1, 0.9
     combined_losses = [
-        w_bce * bce + w_dice * dice for bce, dice in zip(bce_losses, dice_losses)
+        w_bce * bce + w_dice * dice + w_custom * custom for bce, dice, custom in zip(bce_losses, dice_losses, custom_losses)
     ]
     total_loss = sum(combined_losses)
     # return combined_losses[0], total_loss
     return total_loss
 
 
-def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
+def get_dataloader(tra_img_name_list, tra_lbl_name_list, mask_lbl_name_list, transform, batch_size):
     """
     Creates a DataLoader for the dataset.
 
@@ -366,6 +420,7 @@ def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
     dataset = SalObjDataset(
         img_name_list=tra_img_name_list,
         lbl_name_list=tra_lbl_name_list,
+        mask_name_list=mask_lbl_name_list,
         transform=transform,
     )
 
@@ -399,11 +454,12 @@ def train_model(net, optimizer, scheduler, dataloader, device, scaler):
         print(f"        Iteration: {i + 1:4}/{len(dataloader)}, ", end="")
         inputs = data["image"].to(device)
         labels = data["label"].to(device)
+        masks = data["mask"].to(device)
         optimizer.zero_grad()
 
         with torch.autocast(device_type=device.__str__(), dtype=torch.float16):
             outputs = net(inputs)
-            combined_loss = multi_loss_fusion(outputs, labels)
+            combined_loss = multi_loss_fusion(outputs, labels, masks)
 
         scaler.scale(combined_loss).backward()
         """torch.nn.utils.clip_grad_norm_(
@@ -422,7 +478,7 @@ def train_model(net, optimizer, scheduler, dataloader, device, scaler):
 
 
 def train_epochs(
-    net, optimizer, scheduler, dataloader, device, epochs, training_counts, key, train_count, train_target, scaler
+        net, optimizer, scheduler, dataloader, device, epochs, training_counts, key, train_count, train_target, scaler
 ):
     """
     Train the model for given amount of epochs. Updates training counts.
@@ -490,6 +546,7 @@ def main():
     CHECK_FRQ = args.check_frq
     tra_image_dir = args.tra_image_dir
     tra_label_dir = args.tra_masks_dir
+    tra_mask_dir = args.tra_seg_masks_dir
     batch = args.batch
 
     targets = {
@@ -505,8 +562,8 @@ def main():
     if not os.path.exists("saved_models"):
         os.makedirs("saved_models")
 
-    tra_img_name_list, tra_lbl_name_list = load_dataset(
-        tra_image_dir, tra_label_dir, ".*"
+    tra_img_name_list, tra_lbl_name_list, tra_mask_name_list = load_dataset(
+        tra_image_dir, tra_label_dir, tra_mask_dir, ".*"
     )
 
     print(f"Images: {format(len(tra_img_name_list))}, masks: {len(tra_lbl_name_list)}")
@@ -520,6 +577,8 @@ def main():
             net = U2NETP(IN_CHANNELS, OUT_CHANNELS).half()
         else:
             net = U2NETP(IN_CHANNELS, OUT_CHANNELS)
+    elif TRAIN_U2NET_SOFTPLUS:
+        net = U2NETSoftplus(IN_CHANNELS, OUT_CHANNELS)
     else:
         if HALF_PRECISION:
             net = U2NET(IN_CHANNELS, OUT_CHANNELS).half()
@@ -550,7 +609,7 @@ def main():
     def create_and_train(transform, batch_size, epochs, train_type, train_count, train_target):
         """Creates a dataloader and trains the network using the given parameters."""
         dataloader = get_dataloader(
-            tra_img_name_list, tra_lbl_name_list, transform, batch_size
+            tra_img_name_list, tra_lbl_name_list, tra_mask_name_list, transform, batch_size
         )
         train_epochs(
             net,
