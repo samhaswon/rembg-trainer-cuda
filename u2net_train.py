@@ -131,7 +131,7 @@ def masked_loss(pred, target, mask, loss_fn):
     return (loss * mask).mean()  # Only compute loss in masked areas
 
 
-def custom_loss(pred, target, task2_mask, lambda_seg=1.0, lambda_grad=0.5, kernel_size=5):
+def custom_loss(pred, target, task2_mask, lambda_seg=0.75, lambda_grad=0.75, kernel_size=5):
     """
     Custom loss for Task 1, using Task 2 mask to condition segmentation loss
     and dilated mask for gradient loss.
@@ -141,11 +141,11 @@ def custom_loss(pred, target, task2_mask, lambda_seg=1.0, lambda_grad=0.5, kerne
     seg_target, grad_target = target[:, 0, :, :], target[:, 1, :, :]
 
     # Compute segmentation loss (masked by Task 2's mask)
-    seg_loss = masked_loss(seg_pred, seg_target, task2_mask, F.cross_entropy)
+    seg_loss = masked_loss(seg_pred, seg_target, task2_mask, F.cross_entropy)  # F.binary_cross_entropy_with_logits ?
 
     # Compute gradient loss (masked by dilated Task 1 segmentation)
     dilated_mask = dilate_mask(seg_target, kernel_size)
-    grad_loss = masked_loss(grad_pred, grad_target, dilated_mask, F.l1_loss)
+    grad_loss = masked_loss(grad_pred, grad_target, dilated_mask, F.smooth_l1_loss)
 
     # Final loss combination
     return lambda_seg * seg_loss + lambda_grad * grad_loss
@@ -394,7 +394,7 @@ def multi_loss_fusion(d_list, labels_v, masks):
     bce_losses = [bce_loss(d, labels_v) for d in d_list]
     dice_losses = [dice_loss(d, labels_v) for d in d_list]
     custom_losses = [custom_loss(d, labels_v, masks) for d in d_list]
-    w_bce, w_dice, w_custom = (1 / 3) * 0.1, 2 / 3 * 0.1, 0.9
+    w_bce, w_dice, w_custom = (1 / 3) * 0.3, 2 / 3 * 0.3, 0.7
     combined_losses = [
         w_bce * bce + w_dice * dice + w_custom * custom for bce, dice, custom in zip(bce_losses, dice_losses, custom_losses)
     ]
