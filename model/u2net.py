@@ -532,7 +532,7 @@ class U2NETP(nn.Module):
 
 class U2NETSoftplus(nn.Module):
     """
-    U^2-Net with Softplus activation
+    U^2-NetP with Softplus activation
     """
     def __init__(self, in_ch=3, out_ch=1):
         super().__init__()
