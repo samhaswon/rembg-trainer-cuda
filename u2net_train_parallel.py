@@ -1,5 +1,5 @@
 """
-This script trains a deep learning model on an image dataset using various augmentations like flips, rotations, and crops. 
+This script trains a deep learning model on an image dataset using various augmentations like flips, rotations, and crops.
 The model is intended to use with rembg for background removal.
 """
 import os
@@ -19,6 +19,9 @@ from torch import optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from torchvision.transforms import transforms
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.utils.data.distributed import DistributedSampler
 
 from data_loader import (
     SalObjDataset,
@@ -38,11 +41,10 @@ MAIN_SIZE = 1024
 IN_CHANNELS = 3
 OUT_CHANNELS = 2
 TRAIN_UNETP = False
-TRAIN_U2NET_SOFTPLUS = True
+TRAIN_U2NET_SOFTPLUS = False
 
 #: float16 if true, float32 if false
 HALF_PRECISION = False  # not tested!!
-USE_AMP = False
 
 # Defining BCE Loss for Binary Cross Entropy
 bce_loss = nn.BCEWithLogitsLoss(reduction="mean")
@@ -94,6 +96,16 @@ train_configs = {
         "batch_factor": 16,  # same here
     },
 }
+
+
+# --- DDP setup ---
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group('nccl', rank=rank, world_size=world_size)
+
+def cleanup():
+    dist.destroy_process_group()
 
 
 def dice_loss(predict, target, smooth=1.0):
@@ -293,12 +305,15 @@ def save_model_as_onnx(model, device, ite_num, input_tensor_size=(1, IN_CHANNELS
         ite_num (int): Amount of epochs already done.
         input_tensor_size (tuple, optional): The size of the input tensor. Defaults to (1, 3, 320, 320).
     """
+    if dist.get_rank() != 0:
+        return
     x = torch.randn(*input_tensor_size, requires_grad=True)
     x = x.to(device)
 
     onnx_file_name = f"saved_models/{ite_num}.onnx"
+    raw_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
     torch.onnx.export(
-        model,
+        raw_model,
         x,
         onnx_file_name,
         export_params=True,
@@ -320,6 +335,8 @@ def save_checkpoint(state, filename="saved_models/checkpoint.pth.tar"):
         state (dict): State of the model to save.
         filename (str, optional): Path to save the checkpoint. Defaults to "saved_models/checkpoint.pth.tar".
     """
+    if dist.get_rank() != 0:
+        return
     torch.save({"state": state}, filename)
 
 
@@ -346,7 +363,7 @@ def load_checkpoint(net, optimizer, scaler, filename="saved_models/checkpoint.pt
     }
 
     if os.path.isfile(filename):
-        checkpoint = torch.load(filename, weights_only=False)
+        checkpoint = torch.load(filename)
         net.load_state_dict(checkpoint["state"]["state_dict"])
         optimizer.load_state_dict(checkpoint["state"]["optimizer"])
         scaler.load_state_dict(checkpoint["state"]["scaler"])
@@ -410,7 +427,7 @@ def multi_loss_fusion(d_list, labels_v, masks):
     return total_loss
 
 
-def get_dataloader(tra_img_name_list, tra_lbl_name_list, mask_lbl_name_list, transform, batch_size):
+def get_dataloader(tra_img_name_list, tra_lbl_name_list, mask_lbl_name_list, transform, batch_size, rank, world_size):
     """
     Creates a DataLoader for the dataset.
 
@@ -434,10 +451,10 @@ def get_dataloader(tra_img_name_list, tra_lbl_name_list, mask_lbl_name_list, tra
     cores = 4  # freeing up memory a bit
 
     # DataLoader for the dataset
+    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     dataloader = DataLoader(
-        dataset, batch_size=max(1, int(batch_size)), shuffle=True, num_workers=cores
+        dataset, batch_size=max(1, int(batch_size)), sampler=sampler, num_workers=4, pin_memory=True
     )
-
     return dataloader
 
 
@@ -461,34 +478,27 @@ def train_model(net, optimizer, scheduler, dataloader, device, scaler):
         print(f"        Iteration: {i + 1:4}/{len(dataloader)}, ", end="")
         inputs = data["image"].to(device)
         labels = data["label"].to(device)
-        # masks = data["mask"].to(device)
+        masks = data["mask"].to(device)
         optimizer.zero_grad()
 
-        with torch.autocast(device_type=device.__str__(), dtype=torch.float16, enabled=USE_AMP):
-            if HALF_PRECISION:
-                inputs = inputs.half()
+        with torch.autocast(device_type=device.__str__(), dtype=torch.float32):
             outputs = net(inputs)
             # combined_loss = custom_loss(outputs, labels, masks, lambda_seg=0.5, lambda_grad=0.5)
             combined_loss = bce_loss(outputs, labels) * 1/3 + dice_loss(outputs, labels) * 2/3
 
-        if HALF_PRECISION:
-            combined_loss.backward()
-        else:
-            scaler.scale(combined_loss).backward()
+        scaler.scale(combined_loss).backward()
         torch.nn.utils.clip_grad_norm_(
             net.parameters(), max_norm=5.0
         )  # Clip gradients if their norm exceeds 1
-        if HALF_PRECISION:
-            optimizer.step()
-        else:
-            scaler.step(optimizer)
-            scaler.update()
+        scaler.step(optimizer)
+        scaler.update()
         optimizer.zero_grad()
+        scheduler.step()
 
         epoch_loss += combined_loss.item()
 
         print(f"loss: {epoch_loss / (i + 1):.5f}")
-    scheduler.step()
+
     return epoch_loss
 
 
@@ -542,7 +552,9 @@ def train_epochs(
             save_checkpoint(
                 {
                     "epoch_count": epoch + 1,
-                    "state_dict": net.state_dict(),
+                    "state_dict": net.module.state_dict()
+                    if isinstance(net, torch.nn.parallel.DistributedDataParallel)
+                    else net.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "training_counts": training_counts,
                     "scaler": scaler.state_dict(),
@@ -553,141 +565,147 @@ def train_epochs(
     return net
 
 
-def main():
+def main(rank, world_size):
     """
     Main function for initiating training of the model on the dataset.
     """
-    device = get_device()
+    try:
+        setup(rank, world_size)
+        device = torch.device(f"cuda:{rank}")
 
-    args = get_args()
-    global SAVE_FRQ, CHECK_FRQ
-    SAVE_FRQ = args.save_frq
-    CHECK_FRQ = args.check_frq
-    tra_image_dir = args.tra_image_dir
-    tra_label_dir = args.tra_masks_dir
-    tra_mask_dir = args.tra_seg_masks_dir
-    batch = args.batch
+        args = get_args()
+        global SAVE_FRQ, CHECK_FRQ
+        SAVE_FRQ = args.save_frq
+        CHECK_FRQ = args.check_frq
+        tra_image_dir = args.tra_image_dir
+        tra_label_dir = args.tra_masks_dir
+        tra_mask_dir = args.tra_seg_masks_dir
+        batch = args.batch
 
-    targets = {
-        "plain_resized": args.plain_resized,
-        "flipped_h": args.hflipped,
-        "flipped_v": args.vflipped,
-        "rotated_l": args.rotated_l,
-        "rotated_r": args.rotated_r,
-        "crops": args.rand,
-        "crops_loyal": args.loyal,
-    }
+        targets = {
+            "plain_resized": args.plain_resized,
+            "flipped_h": args.hflipped,
+            "flipped_v": args.vflipped,
+            "rotated_l": args.rotated_l,
+            "rotated_r": args.rotated_r,
+            "crops": args.rand,
+            "crops_loyal": args.loyal,
+        }
 
-    if not os.path.exists("saved_models"):
-        os.makedirs("saved_models")
+        if rank == 0 and not os.path.exists("saved_models"):
+            os.makedirs("saved_models")
 
-    tra_img_name_list, tra_lbl_name_list, tra_mask_name_list = load_dataset(
-        tra_image_dir, tra_label_dir, tra_mask_dir, ".*"
-    )
-
-    print(f"Images: {format(len(tra_img_name_list))}, masks: {len(tra_lbl_name_list)}")
-
-    if len(tra_img_name_list) != len(tra_lbl_name_list):
-        print("Different amounts of images and masks, can't proceed mate")
-        return
-
-    # if "cuda" in str(device):
-    #     torch.backends.cuda.matmul.allow_tf32 = True
-
-    if TRAIN_UNETP:
-        if HALF_PRECISION:
-            net = U2NETP(IN_CHANNELS, OUT_CHANNELS).half()
-        else:
-            net = U2NETP(IN_CHANNELS, OUT_CHANNELS)
-    elif TRAIN_U2NET_SOFTPLUS:
-        print("Using U2Net Serial")
-        net = U2NETPSerial()
-    else:
-        net = SwinUnet(img_size=1024, num_classes=2, patch_size=4, window_size=8, in_chans=3)
-        # if HALF_PRECISION:
-        #     net = U2NET(IN_CHANNELS, OUT_CHANNELS).half()
-        # else:
-        #     net = U2NET(IN_CHANNELS, OUT_CHANNELS)
-    if HALF_PRECISION:
-        net = net.half()
-    # print("Compiling model kernels")
-    # try:
-    #     net: nn.Module = torch.compile(net, mode="max-autotune")
-    #     print("Continuing setup")
-    # except RuntimeError:
-    #     print("Failed to compile model. This might be a little slower.")
-    net.to(device)
-    net.train()
-
-    optimizer = bnb.optim.AdamW8bit(
-        net.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0
-    )
-
-    grad_scaler = torch.cuda.amp.GradScaler()
-
-    training_counts = load_checkpoint(net, optimizer, grad_scaler)
-    # dealing with negative values, if model was trained for more epochs than in target:
-    for key, count in training_counts.items():
-        if targets[key] < count:
-            targets[key] = count
-        print(
-            f"Task: {train_configs[key]['name']:<17} Epochs done: {count}/{targets[key]}"
+        tra_img_name_list, tra_lbl_name_list, tra_mask_name_list = load_dataset(
+            tra_image_dir, tra_label_dir, tra_mask_dir, ".*"
         )
 
-    print("———\n")
+        print(f"Images: {format(len(tra_img_name_list))}, masks: {len(tra_lbl_name_list)}")
 
-    scheduler = CosineAnnealingLR(optimizer, T_max=sum(targets.values()), eta_min=1e-6)
+        if len(tra_img_name_list) != len(tra_lbl_name_list):
+            print("Different amounts of images and masks, can't proceed mate")
+            cleanup()
+            return
 
-    def create_and_train(transform, batch_size, epochs, train_type, train_count, train_target):
-        """Creates a dataloader and trains the network using the given parameters."""
-        dataloader = get_dataloader(
-            tra_img_name_list, tra_lbl_name_list, tra_mask_name_list, transform, batch_size
-        )
-        train_epochs(
-            net,
-            optimizer,
-            scheduler,
-            dataloader,
-            device,
-            epochs,
-            training_counts,
-            train_type,
-            train_count,
-            train_target,
-            grad_scaler
-        )
+        # if "cuda" in str(device):
+        #     torch.backends.cuda.matmul.allow_tf32 = True
 
-    complete = {
-        "plain_resized": False,
-        "flipped_h": False,
-        "flipped_v": False,
-        "rotated_l": False,
-        "rotated_r": False,
-        "crops": False,
-        "crops_loyal": False,
-    }
-
-    while not all(list(complete.values())):
-        # Training loop
-        for train_type, config in train_configs.items():
-            if training_counts[train_type] < targets[train_type]:
-                print(config["message"])
-                # epochs = range(training_counts[train_type], targets[train_type])
-                transform = transforms.Compose(config["transform"])
-
-                create_and_train(
-                    transform, batch * config["batch_factor"], range(1), train_type,
-                    training_counts[train_type], targets[train_type]
-                )
-
-                # training_counts[train_type] = targets[train_type]
-                # training_counts[train_type] += 1
+        if TRAIN_UNETP:
+            if HALF_PRECISION:
+                net = U2NETP(IN_CHANNELS, OUT_CHANNELS).half()
             else:
-                print(f"Completed {train_type}")
-                complete[train_type] = True
+                net = U2NETP(IN_CHANNELS, OUT_CHANNELS)
+        elif TRAIN_U2NET_SOFTPLUS:
+            net = U2NETPSerial()
+        else:
+            net = SwinUnet(img_size=1024, num_classes=2, patch_size=4, window_size=8, in_chans=3)
+            # if HALF_PRECISION:
+            #     net = U2NET(IN_CHANNELS, OUT_CHANNELS).half()
+            # else:
+            #     net = U2NET(IN_CHANNELS, OUT_CHANNELS)
+        # print("Compiling model kernels")
+        # try:
+        #     net: nn.Module = torch.compile(net, mode="max-autotune")
+        #     print("Continuing setup")
+        # except RuntimeError:
+        #     print("Failed to compile model. This might be a little slower.")
+        net.to(device)
+        net.train()
+        optimizer = bnb.optim.AdamW8bit(
+            net.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0
+        )
 
-    print("Nothing left to do!")
+        grad_scaler = torch.cuda.amp.GradScaler()
+
+        training_counts = load_checkpoint(net, optimizer, grad_scaler)
+        net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[rank])
+        # dealing with negative values, if model was trained for more epochs than in target:
+        for key, count in training_counts.items():
+            if targets[key] < count:
+                targets[key] = count
+            print(
+                f"Task: {train_configs[key]['name']:<17} Epochs done: {count}/{targets[key]}"
+            )
+
+        print("———\n")
+
+        scheduler = CosineAnnealingLR(optimizer, T_max=sum(targets.values()), eta_min=1e-6)
+
+        def create_and_train(transform, batch_size, epochs, train_type, train_count, train_target):
+            """Creates a dataloader and trains the network using the given parameters."""
+            dataloader = get_dataloader(
+                tra_img_name_list, tra_lbl_name_list, tra_mask_name_list, transform, batch_size, rank, world_size
+            )
+            train_epochs(
+                net,
+                optimizer,
+                scheduler,
+                dataloader,
+                device,
+                epochs,
+                training_counts,
+                train_type,
+                train_count,
+                train_target,
+                grad_scaler
+            )
+
+        complete = {
+            "plain_resized": False,
+            "flipped_h": False,
+            "flipped_v": False,
+            "rotated_l": False,
+            "rotated_r": False,
+            "crops": False,
+            "crops_loyal": False,
+        }
+
+        while not all(list(complete.values())):
+            # Training loop
+            for train_type, config in train_configs.items():
+                if training_counts[train_type] < targets[train_type]:
+                    print(config["message"])
+                    # epochs = range(training_counts[train_type], targets[train_type])
+                    transform = transforms.Compose(config["transform"])
+
+                    create_and_train(
+                        transform, batch * config["batch_factor"], range(1), train_type,
+                        training_counts[train_type], targets[train_type]
+                    )
+
+                    # training_counts[train_type] = targets[train_type]
+                    # training_counts[train_type] += 1
+                elif rank == 0:
+                    print(f"Completed {train_type}")
+                    complete[train_type] = True
+
+        print("Nothing left to do!")
+    finally:
+        # Sync
+        dist.barrier()
+        # Teardown
+        cleanup()
 
 
 if __name__ == "__main__":
-    main()
+    world_size = torch.cuda.device_count()
+    mp.spawn(main, args=(world_size,), nprocs=world_size, join=True)

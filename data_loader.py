@@ -81,7 +81,11 @@ class RandomCrop:
                         self._calculate_white_percentage(np.array(cropped_image))
                         <= threshold
                     ):
-                        return {"image": cropped_image, "label": cropped_label, "mask": cropped_mask}
+                        return {
+                            "image": cropped_image,
+                            "label": cropped_label,
+                            "mask": cropped_mask
+                        }
 
         raise ValueError("Fully white image is given :(")
 
@@ -223,15 +227,21 @@ class ToTensorLab:
         image, label, mask = sample["image"], sample["label"], sample["mask"]
 
         # Convert to tensor
-        image = tf.to_image(image)
+        image2 = tf.to_image(image)
+        image.close()
+        image = image2
         image = tf.to_dtype(image, dtype=torch.float32, scale=True)
-        label = tf.to_image(label)
+        label2 = tf.to_image(label)
+        label.close()
+        label = label2
         label = tf.to_dtype(label, dtype=torch.float32, scale=True)
-        mask = tf.to_image(mask)
+        mask2 = tf.to_image(mask)
+        mask.close()
+        mask = mask2
         mask = tf.to_dtype(mask, dtype=torch.float32, scale=True)
 
         if HALF_PRECISION:
-            image, label, mask = image.half(), label.half(), mask.half()
+            image, label = image.half(), label.half() # , mask.half()
 
         return {"image": image, "label": label, "mask": mask}
 
@@ -261,7 +271,7 @@ class SalObjDataset(Dataset):
         """Return the total number of images in the dataset."""
         return len(self.img_name_list)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx) -> dict:
         """
         Fetch an image and its corresponding label, apply any transformations if needed,
         and return them as a dictionary.
@@ -277,6 +287,12 @@ class SalObjDataset(Dataset):
         image = Image.open(self.img_name_list[idx]).convert('RGB')
         label = Image.open(self.lbl_name_list[idx]).convert('LA')
         mask = Image.open(self.mask_name_list[idx]).convert('L')
+        # try:
+        #     image.putalpha(mask)
+        # except:
+        #     print(self.img_name_list[idx])
+        #     print(self.mask_name_list[idx])
+        #     raise
 
         sample = {"image": image, "label": label, "mask": mask}
 

@@ -532,41 +532,41 @@ class U2NETP(nn.Module):
 
 class U2NETSoftplus(nn.Module):
     """
-    U^2-NetP with Softplus activation
+    U^2-Net with Softplus activation
     """
     def __init__(self, in_ch=3, out_ch=1):
         super().__init__()
 
-        self.stage1 = RSU7(in_ch, 16, 64)
+        self.stage1 = RSU7(in_ch, 32, 64)
         self.pool12 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
 
-        self.stage2 = RSU6(64, 16, 64)
+        self.stage2 = RSU6(64, 32, 128)
         self.pool23 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
 
-        self.stage3 = RSU5(64, 16, 64)
+        self.stage3 = RSU5(128, 64, 256)
         self.pool34 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
 
-        self.stage4 = RSU4(64, 16, 64)
+        self.stage4 = RSU4(256, 128, 512)
         self.pool45 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
 
-        self.stage5 = RSU4F(64, 16, 64)
+        self.stage5 = RSU4F(512, 256, 512)
         self.pool56 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
 
-        self.stage6 = RSU4F(64, 16, 64)
+        self.stage6 = RSU4F(512, 256, 512)
 
         # decoder
-        self.stage5d = RSU4F(128, 16, 64)
-        self.stage4d = RSU4(128, 16, 64)
-        self.stage3d = RSU5(128, 16, 64)
-        self.stage2d = RSU6(128, 16, 64)
+        self.stage5d = RSU4F(1024, 256, 512)
+        self.stage4d = RSU4(1024, 128, 256)
+        self.stage3d = RSU5(512, 64, 128)
+        self.stage2d = RSU6(256, 32, 64)
         self.stage1d = RSU7(128, 16, 64)
 
         self.side1 = nn.Conv2d(64, out_ch, 3, padding=1)
         self.side2 = nn.Conv2d(64, out_ch, 3, padding=1)
-        self.side3 = nn.Conv2d(64, out_ch, 3, padding=1)
-        self.side4 = nn.Conv2d(64, out_ch, 3, padding=1)
-        self.side5 = nn.Conv2d(64, out_ch, 3, padding=1)
-        self.side6 = nn.Conv2d(64, out_ch, 3, padding=1)
+        self.side3 = nn.Conv2d(128, out_ch, 3, padding=1)
+        self.side4 = nn.Conv2d(256, out_ch, 3, padding=1)
+        self.side5 = nn.Conv2d(512, out_ch, 3, padding=1)
+        self.side6 = nn.Conv2d(512, out_ch, 3, padding=1)
 
         self.outconv = nn.Conv2d(6 * out_ch, out_ch, 1)
 
@@ -597,7 +597,7 @@ class U2NETSoftplus(nn.Module):
         hx6 = self.stage6(hx)
         hx6up = _upsample_like(hx6, hx5)
 
-        # decoder
+        # -------------------- decoder --------------------
         hx5d = self.stage5d(torch.cat((hx6up, hx5), 1))
         hx5dup = _upsample_like(hx5d, hx4)
 
@@ -641,3 +641,186 @@ class U2NETSoftplus(nn.Module):
             F.softplus(d5),
             F.softplus(d6),
         )
+
+
+class U2NETPModified(nn.Module):
+    def __init__(self, in_ch=3, out_ch=1, activation=F.sigmoid):
+        super().__init__()
+        self.activation = activation
+
+        self.stage1 = RSU7(in_ch, 16, 64)
+        self.pool12 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
+
+        self.stage2 = RSU6(64, 16, 64)
+        self.pool23 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
+
+        self.stage3 = RSU5(64, 16, 64)
+        self.pool34 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
+
+        self.stage4 = RSU4(64, 16, 64)
+        self.pool45 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
+
+        self.stage5 = RSU4F(64, 16, 64)
+        self.pool56 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
+
+        self.stage6 = RSU4F(64, 16, 64)
+
+        # decoder
+        self.stage5d = RSU4F(128, 16, 64)
+        self.stage4d = RSU4(128, 16, 64)
+        self.stage3d = RSU5(128, 16, 64)
+        self.stage2d = RSU6(128, 16, 64)
+        self.stage1d = RSU7(128, 16, 64)
+
+        self.side1 = nn.Conv2d(64, out_ch, 3, padding=1)
+        self.side2 = nn.Conv2d(64, out_ch, 3, padding=1)
+        self.side3 = nn.Conv2d(64, out_ch, 3, padding=1)
+        self.side4 = nn.Conv2d(64, out_ch, 3, padding=1)
+        self.side5 = nn.Conv2d(64, out_ch, 3, padding=1)
+        self.side6 = nn.Conv2d(64, out_ch, 3, padding=1)
+
+        self.outconv = nn.Conv2d(6 * out_ch, out_ch, 1)
+
+    def forward(self, x):
+        hx = x
+
+        hx1 = self.stage1(hx)
+        hx = self.pool12(hx1)
+
+        hx2 = self.stage2(hx)
+        hx = self.pool23(hx2)
+
+        hx3 = self.stage3(hx)
+        hx = self.pool34(hx3)
+
+        hx4 = self.stage4(hx)
+        hx = self.pool45(hx4)
+
+        hx5 = self.stage5(hx)
+        hx = self.pool56(hx5)
+
+        hx6 = self.stage6(hx)
+        hx6up = _upsample_like(hx6, hx5)
+
+        hx5d = self.stage5d(torch.cat((hx6up, hx5), 1))
+        hx5dup = _upsample_like(hx5d, hx4)
+
+        hx4d = self.stage4d(torch.cat((hx5dup, hx4), 1))
+        hx4dup = _upsample_like(hx4d, hx3)
+
+        hx3d = self.stage3d(torch.cat((hx4dup, hx3), 1))
+        hx3dup = _upsample_like(hx3d, hx2)
+
+        hx2d = self.stage2d(torch.cat((hx3dup, hx2), 1))
+        hx2dup = _upsample_like(hx2d, hx1)
+
+        hx1d = self.stage1d(torch.cat((hx2dup, hx1), 1))
+
+        d1 = self.side1(hx1d)
+        d2 = _upsample_like(self.side2(hx2d), d1)
+        d3 = _upsample_like(self.side3(hx3d), d1)
+        d4 = _upsample_like(self.side4(hx4d), d1)
+        d5 = _upsample_like(self.side5(hx5d), d1)
+        d6 = _upsample_like(self.side6(hx6), d1)
+
+        d0 = self.outconv(torch.cat((d1, d2, d3, d4, d5, d6), 1))
+
+        return self.activation(d0), self.activation(d1)
+
+
+class U2NETPModified2(nn.Module):
+    def __init__(self, in_ch=4, out_ch=1, activation=F.sigmoid):
+        super().__init__()
+        self.activation = activation
+
+        self.stage1 = RSU7(in_ch, 32, 64)
+        self.pool12 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
+
+        self.stage2 = RSU6(64, 32, 128)
+        self.pool23 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
+
+        self.stage3 = RSU5(128, 64, 256)
+        self.pool34 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
+
+        self.stage4 = RSU4(256, 128, 512)
+        self.pool45 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
+
+        self.stage5 = RSU4F(512, 256, 512)
+        self.pool56 = nn.MaxPool2d(2, stride=2, ceil_mode=True)
+
+        self.stage6 = RSU4F(512, 256, 512)
+
+        # decoder
+        self.stage5d = RSU4F(1024, 256, 512)
+        self.stage4d = RSU4(1024, 128, 256)
+        self.stage3d = RSU5(512, 64, 128)
+        self.stage2d = RSU6(256, 32, 64)
+        self.stage1d = RSU7(128, 16, 64)
+
+        self.side1 = nn.Conv2d(64, out_ch, 3, padding=1)
+        self.side2 = nn.Conv2d(64, out_ch, 3, padding=1)
+        self.side3 = nn.Conv2d(128, out_ch, 3, padding=1)
+        self.side4 = nn.Conv2d(256, out_ch, 3, padding=1)
+        self.side5 = nn.Conv2d(512, out_ch, 3, padding=1)
+        self.side6 = nn.Conv2d(512, out_ch, 3, padding=1)
+
+        self.outconv = nn.Conv2d(6 * out_ch, out_ch, 1)
+
+    def forward(self, x):
+        hx = x
+
+        hx1 = self.stage1(hx)
+        hx = self.pool12(hx1)
+
+        hx2 = self.stage2(hx)
+        hx = self.pool23(hx2)
+
+        hx3 = self.stage3(hx)
+        hx = self.pool34(hx3)
+
+        hx4 = self.stage4(hx)
+        hx = self.pool45(hx4)
+
+        hx5 = self.stage5(hx)
+        hx = self.pool56(hx5)
+
+        hx6 = self.stage6(hx)
+        hx6up = _upsample_like(hx6, hx5)
+
+        hx5d = self.stage5d(torch.cat((hx6up, hx5), 1))
+        hx5dup = _upsample_like(hx5d, hx4)
+
+        hx4d = self.stage4d(torch.cat((hx5dup, hx4), 1))
+        hx4dup = _upsample_like(hx4d, hx3)
+
+        hx3d = self.stage3d(torch.cat((hx4dup, hx3), 1))
+        hx3dup = _upsample_like(hx3d, hx2)
+
+        hx2d = self.stage2d(torch.cat((hx3dup, hx2), 1))
+        hx2dup = _upsample_like(hx2d, hx1)
+
+        hx1d = self.stage1d(torch.cat((hx2dup, hx1), 1))
+
+        d1 = self.side1(hx1d)
+        d2 = _upsample_like(self.side2(hx2d), d1)
+        d3 = _upsample_like(self.side3(hx3d), d1)
+        d4 = _upsample_like(self.side4(hx4d), d1)
+        d5 = _upsample_like(self.side5(hx5d), d1)
+        d6 = _upsample_like(self.side6(hx6), d1)
+
+        d0 = self.outconv(torch.cat((d1, d2, d3, d4, d5, d6), 1))
+
+        return self.activation(d0), self.activation(d1)
+
+
+class U2NETPSerial(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model1 = U2NETPModified2(in_ch=3, out_ch=1)
+        self.model2 = U2NETPModified(in_ch=4, out_ch=1, activation=lambda x: x)
+
+    def forward(self, x):
+        out1, _ = self.model1(x)
+        x_concat = torch.cat((x, out1), dim=1)
+        out2, _ = self.model2(x_concat)
+        return torch.cat((out2, out1), dim=1)
