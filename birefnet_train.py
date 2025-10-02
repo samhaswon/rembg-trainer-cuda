@@ -30,7 +30,7 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 import numpy as np
 from PIL import Image
@@ -48,6 +48,7 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
+from transformers.trainer_utils import EvalPrediction
 
 
 class BiRefNetHFAdapter(nn.Module):
@@ -62,6 +63,12 @@ class BiRefNetHFAdapter(nn.Module):
         super().__init__()
         self.base = base
         self.proj = None  # lazily built if base outputs != 1 channel
+
+        # Buffers for Normalization
+        # mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1)
+        # std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1)
+        # self.register_buffer("mean", mean, persistent=False)
+        # self.register_buffer("std", std, persistent=False)
 
     def _extract_logits(self, out):
         """
@@ -106,6 +113,8 @@ class BiRefNetHFAdapter(nn.Module):
         if pixel_values is None and "x" not in kwargs:
             raise TypeError("Expected 'pixel_values' or 'x' tensor.")
         x = pixel_values if pixel_values is not None else kwargs.pop("x")
+        # Normalize input
+        # x = (x - self.mean) / self.std
         out = self.base(x)
         logits = self._extract_logits(out)
 
@@ -272,8 +281,8 @@ class FolderSegDataset(Dataset):
         target = ( (self.image_size + 31) // 32 ) * 32
 
         img_sq = resize_and_pad_square(img, target)
+        msk_sq = resize_and_pad_square(msk, target)
         # masks with nearest, same final size
-        msk_sq = F.interpolate(msk[None], size=img_sq.shape[-2:], mode="nearest")[0].clamp(0, 1)
 
         return {"pixel_values": img_sq, "labels": msk_sq, "id": ip.name}
 
@@ -345,6 +354,33 @@ class SegTrainer(Trainer):
         loss = self.criterion(logits, labels)
         return (loss, {"logits": logits}) if return_outputs else loss
 
+    def prediction_step(
+            self,
+            model,
+            inputs: dict,
+            prediction_loss_only: bool,
+            ignore_keys: Optional[List[str]] = None,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        # Split out labels
+        labels = inputs.pop("labels", None)
+
+        # Forward pass (no grad)
+        with torch.no_grad():
+            outputs = model(**inputs)
+
+        logits = outputs["logits"]
+
+        # Compute the same loss you use in training if labels are present
+        loss = None
+        if labels is not None:
+            loss = self.criterion(logits, labels)
+
+        if prediction_loss_only:
+            return (loss, None, None)
+
+        # Return tensors on CPU for metric aggregation
+        return (loss, logits.detach().cpu(), labels.detach().cpu() if labels is not None else None)
+
 
 def split_pairs(pairs: List[Tuple[Path, Path]], eval_size: int, seed: int) -> Tuple[List, List]:
     """
@@ -362,35 +398,27 @@ def split_pairs(pairs: List[Tuple[Path, Path]], eval_size: int, seed: int) -> Tu
     return [pairs[i] for i in train_idx], [pairs[i] for i in eval_idx]
 
 
-def compute_seg_metrics(eval_pred) -> Dict[str, float]:
-    """
-    Compute MAE and IoU@0.5 for quick feedback.
+def compute_seg_metrics(eval_pred: EvalPrediction) -> dict:
+    # eval_pred.predictions and eval_pred.label_ids are numpy arrays
+    preds = torch.tensor(eval_pred.predictions)   # (N, 1, H, W)
+    labels = torch.tensor(eval_pred.label_ids)    # (N, 1, H, W)
 
-    Parameters
-    ----------
-    eval_pred
-        Tuple(logits, labels).
-
-    Returns
-    -------
-    dict
-        Metrics dict.
-    """
-    logits, labels = eval_pred
-    if isinstance(logits, (list, tuple)):
-        logits = logits[-1]
-    logits = torch.tensor(logits)
-    labels = torch.tensor(labels)
-    preds = torch.sigmoid(logits)
+    preds = torch.sigmoid(preds)
     mae = (preds - labels).abs().mean().item()
 
-    # IoU@0.5 on binarized maps, just for sanity checks
+    # IoU@0.5 for quick reference (binarized)
     bin_pred = (preds >= 0.5).float()
-    inter = (bin_pred * labels.round()).sum(dim=(1, 2, 3))
-    union = bin_pred.sum(dim=(1, 2, 3)) + labels.round().sum(dim=(1, 2, 3)) - inter
+    bin_lab  = labels.round()
+    inter = (bin_pred * bin_lab).sum(dim=(1, 2, 3))
+    union = bin_pred.sum(dim=(1, 2, 3)) + bin_lab.sum(dim=(1, 2, 3)) - inter
     iou = ((inter + 1e-6) / (union + 1e-6)).mean().item()
 
-    return {"mae": mae, "iou50": iou}
+    # Optional: soft Dice as a nicer segmentation score
+    num = 2 * (preds * labels).sum(dim=(1, 2, 3))
+    den = preds.pow(2).sum(dim=(1, 2, 3)) + labels.pow(2).sum(dim=(1, 2, 3)) + 1e-6
+    dice = (num / den).mean().item()
+
+    return {"mae": mae, "iou50": iou, "dice": dice}
 
 
 def parse_args() -> argparse.Namespace:
@@ -445,8 +473,13 @@ def main() -> None:
         per_device_eval_batch_size=args.per_device_eval_batch_size,
         gradient_accumulation_steps=grad_accum,
         logging_steps=50,
+        logging_strategy="steps",
         save_steps=1000,
-        evaluation_strategy="steps",
+        save_strategy="steps",
+        eval_strategy="steps",
+        load_best_model_at_end=True,
+        metric_for_best_model="mae",  # or "dice"
+        greater_is_better=False,  # True if you choose "dice"
         eval_steps=500,
         save_total_limit=2,
         remove_unused_columns=False,
@@ -463,7 +496,7 @@ def main() -> None:
         compute_metrics=compute_seg_metrics,
     )
 
-    trainer.train()
+    trainer.train(resume_from_checkpoint=True)
     trainer.save_model(args.output_dir)
 
 
