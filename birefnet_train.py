@@ -34,7 +34,6 @@ from typing import Any, Dict, List, Tuple, Optional
 
 import numpy as np
 from PIL import Image
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -472,7 +471,7 @@ def main() -> None:
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=args.per_device_eval_batch_size,
         gradient_accumulation_steps=grad_accum,
-        logging_steps=50,
+        logging_steps=100,
         logging_strategy="steps",
         save_steps=1000,
         save_strategy="steps",
@@ -480,8 +479,8 @@ def main() -> None:
         load_best_model_at_end=True,
         metric_for_best_model="mae",  # or "dice"
         greater_is_better=False,  # True if you choose "dice"
-        eval_steps=500,
-        save_total_limit=2,
+        eval_steps=1000,
+        save_total_limit=5,
         remove_unused_columns=False,
         dataloader_num_workers=4,
         report_to=[],
