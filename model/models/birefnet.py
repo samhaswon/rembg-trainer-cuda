@@ -300,8 +300,8 @@ class Decoder(nn.Module):
         _p1 = F.interpolate(_p1, size=x.shape[2:], mode='bilinear', align_corners=True)
 
         if self.on_devices:
-            _p1 = _p1.to("cuda:0")
-            x = x.to("cuda:0")
+            _p1 = _p1.to("cuda:0", non_blocking=True)
+            x = x.to("cuda:0", non_blocking=True)
 
         if self.config.dec_ipt:
             patches_batch = image2patches(x, patch_ref=_p1, transformation='b c (hg h) (wg w) -> b (c hg wg) h w') if self.split else x
