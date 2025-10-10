@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 
+import bitsandbytes as bnb
 import numpy as np
 from PIL import Image
 import torch
@@ -337,7 +338,7 @@ def save_checkpoint(state, filename="saved_models/checkpoint.pth.tar"):
     torch.save({"state": state}, filename)
 
 
-def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
+def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar") -> int:
     """
     Loads model state from a checkpoint.
 
@@ -353,7 +354,8 @@ def load_checkpoint(net, optimizer, filename="saved_models/checkpoint.pth.tar"):
     if os.path.isfile(filename):
         checkpoint = torch.load(filename)
         net.load_state_dict(checkpoint["state"]["state_dict"])
-        optimizer.load_state_dict(checkpoint["state"]["optimizer"])
+        if filename != "saved_models/checkpoint.pth.tar":
+            optimizer.load_state_dict(checkpoint["state"]["optimizer"])
 
         # Update the dictionary with values from the checkpoint
         # Only updates keys that exist in both dictionaries
@@ -383,6 +385,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    torch.backends.cudnn.benchmark = True
     args = parse_args()
     torch.manual_seed(args.seed)
 
@@ -407,8 +410,15 @@ def main() -> None:
     )
 
     model = BiRefNet()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
-    epochs_done = load_checkpoint(model, optimizer)
+    optimizer = bnb.optim.AdamW8bit(
+        model.parameters(),
+        lr=args.learning_rate,
+        betas=(0.9, 0.999),
+        eps=1e-08,
+        weight_decay=0,
+    )
+    epochs_done = load_checkpoint(model, optimizer, filename="saved_models/checkpoint_1.pth.tar")
+    epochs_done = 2
     epochs_left = args.num_train_epochs - epochs_done
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs_left, eta_min=1e-6)
     criterion = BCEPlusDice()
@@ -424,10 +434,10 @@ def main() -> None:
 
     for i in range(epochs_left):
         model.train()
-        train_progress_bar = tqdm(total=len(train_ds), desc=f"Training [{i}/{epochs_left}]")
+        train_progress_bar = tqdm(total=len(train_ds), desc=f"Training [{i + 1}/{epochs_left}]")
         for data in train_ds:
             inputs = data["pixel_values"]
-            labels = data["labels"].to("cuda:0")
+            labels = data["labels"].to("cuda:0", non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
             outputs = model(inputs)
@@ -444,19 +454,19 @@ def main() -> None:
         model.eval()
         save_checkpoint(
             {
-                "epoch": epochs_done,
+                "epoch": epochs_done + i + 1,
                 "state_dict": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
             },
-            f"saved_models/checkpoint_{i}.pth.tar",
+            f"saved_models/checkpoint_{i + 1}.pth.tar",
         )
-        eval_progress_bar = tqdm(total=len(eval_ds), desc=f"Evaluating [{i}/{epochs_left}]")
+        eval_progress_bar = tqdm(total=len(eval_ds), desc=f"Evaluating [{i + 1}/{epochs_left}]")
         eval_results = {"mae": 0.0, "iou50": 0.0, "dice": 0.0}
         for data in eval_ds:
             inputs = data["pixel_values"]
             labels = data["labels"]
             with torch.inference_mode():
-                outputs = model(inputs)
+                outputs = model(inputs)[0]
             results = compute_seg_metrics(outputs.cpu(), labels)
             eval_results["mae"] += results["mae"]
             eval_results["iou50"] += results["iou50"]
@@ -466,7 +476,7 @@ def main() -> None:
         eval_results["mae"] = eval_results["mae"] / (len(eval_ds) // args.per_device_eval_batch_size)
         eval_results["iou50"] = eval_results["iou50"] / (len(eval_ds) // args.per_device_eval_batch_size)
         eval_results["dice"] = eval_results["dice"] / (len(eval_ds) // args.per_device_eval_batch_size)
-        print(f"Epoch {i} eval: {eval_results}")
+        print(f"Epoch {i + 1} eval: {eval_results}")
 
 
 if __name__ == "__main__":
