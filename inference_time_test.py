@@ -37,6 +37,9 @@ if __name__ == '__main__':
     test_320 = torch.randn(1, 3, 320, 320)
     test_512 = torch.randn(1, 3, 512, 512)
     test_1024 = torch.randn(1, 3, 1024, 1024)
+    test_1280 = torch.randn(1, 3, 1280, 1280)
+    test_1728 = torch.randn(1, 3, 1728, 1728)
+    test_2048 = torch.randn(1, 3, 2048, 2048)
 
     # Instantiate models and put them in eval mode
     model = U2NET(3, 1).eval()
@@ -48,6 +51,9 @@ if __name__ == '__main__':
         "320x320": test_320,
         "512x512": test_512,
         "1024x1024": test_1024,
+        "1280x1280": test_1280,
+        "1728x1728": test_1728,
+        "2048x2048": test_2048,
     }
 
     models = {
@@ -63,6 +69,7 @@ if __name__ == '__main__':
 
     for model_name, mdl in models.items():
         print(f"\n=== {model_name} ===")
+        # with torch.inference_mode():
         for size_name, inp in inputs.items():
             # Warm-up to avoid measuring lazy init cost
             _ = mdl(inp)
@@ -77,6 +84,7 @@ if __name__ == '__main__':
 
     for model_name, mdl in models.items():
         print(f"\n=== {model_name} (`torch.compile`) ===")
+        # with torch.inference_mode():
         for size_name, inp in inputs.items():
             # Warm-up to avoid measuring lazy init cost
             mdl_c = torch.compile(mdl, mode="max-autotune-no-cudagraphs").eval()

@@ -285,7 +285,7 @@ class SalObjDataset(Dataset):
 
         # Load images from the appropriate files
         image = Image.open(self.img_name_list[idx]).convert('RGB')
-        label = Image.open(self.lbl_name_list[idx]).convert('LA')
+        label = Image.open(self.lbl_name_list[idx]).convert('L')
         mask = Image.open(self.mask_name_list[idx]).convert('L')
         # try:
         #     image.putalpha(mask)

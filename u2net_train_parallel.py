@@ -39,9 +39,10 @@ SAVE_FRQ = 0
 CHECK_FRQ = 0
 MAIN_SIZE = 1024
 IN_CHANNELS = 3
-OUT_CHANNELS = 2
+OUT_CHANNELS = 1
 TRAIN_UNETP = False
 TRAIN_U2NET_SOFTPLUS = False
+USE_AMP = False
 
 #: float16 if true, float32 if false
 HALF_PRECISION = False  # not tested!!
@@ -383,7 +384,7 @@ def load_checkpoint(net, optimizer, scaler, filename="saved_models/checkpoint.pt
     return training_counts
 
 
-def load_dataset(img_dir, lbl_dir, mask_dir, ext):
+def load_dataset(img_dir, lbl_dir, ext):
     """
     Loads image and mask filenames from given directories.
 
@@ -397,37 +398,33 @@ def load_dataset(img_dir, lbl_dir, mask_dir, ext):
     """
     img_list = [img_dir + os.path.sep + x for x in os.listdir(img_dir)]
     lbl_list = [lbl_dir + os.path.sep + x for x in os.listdir(lbl_dir)]
-    mask_list = [mask_dir + os.path.sep + x for x in os.listdir(lbl_dir)]
 
-    return img_list, lbl_list, mask_list
+    return img_list, lbl_list
 
 
-def multi_loss_fusion(d_list, labels_v, masks):
+def multi_loss_fusion(d_list, labels_v):
     """
     Combines BCE and Dice losses. Gives more weight to dice loss.
 
     Parameters:
         d_list (list): List of predicted outputs.
         labels_v (Tensor): Ground truth/target outputs.
-        masks (Tensor): mask for loss calculations
 
     Returns:
         float: Combined loss value.
     """
     bce_losses = [bce_loss(d, labels_v) for d in d_list]
     dice_losses = [dice_loss(d, labels_v) for d in d_list]
-    custom_losses = [custom_loss(d, labels_v, masks) for d in d_list]
-    w_bce, w_dice, w_custom = (1 / 3) * 0.3, 2 / 3 * 0.3, 0.7
+    w_bce, w_dice = 1 / 3, 2 / 3
     combined_losses = [
-        w_bce * bce + w_dice * dice + w_custom * custom for bce, dice, custom in
-        zip(bce_losses, dice_losses, custom_losses)
+        w_bce * bce + w_dice * dice for bce, dice in zip(bce_losses, dice_losses)
     ]
     total_loss = sum(combined_losses)
     # return combined_losses[0], total_loss
     return total_loss
 
 
-def get_dataloader(tra_img_name_list, tra_lbl_name_list, mask_lbl_name_list, transform, batch_size, rank, world_size):
+def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size, rank, world_size):
     """
     Creates a DataLoader for the dataset.
 
@@ -444,7 +441,6 @@ def get_dataloader(tra_img_name_list, tra_lbl_name_list, mask_lbl_name_list, tra
     dataset = SalObjDataset(
         img_name_list=tra_img_name_list,
         lbl_name_list=tra_lbl_name_list,
-        mask_name_list=mask_lbl_name_list,
         transform=transform,
     )
 
@@ -478,13 +474,12 @@ def train_model(net, optimizer, scheduler, dataloader, device, scaler):
         print(f"        Iteration: {i + 1:4}/{len(dataloader)}, ", end="")
         inputs = data["image"].to(device)
         labels = data["label"].to(device)
-        masks = data["mask"].to(device)
+        # masks = data["mask"].to(device)
         optimizer.zero_grad()
 
-        with torch.autocast(device_type=device.__str__(), dtype=torch.float32):
+        with torch.autocast(device_type=device.__str__(), dtype=torch.float16, enabled=USE_AMP):
             outputs = net(inputs)
-            # combined_loss = custom_loss(outputs, labels, masks, lambda_seg=0.5, lambda_grad=0.5)
-            combined_loss = bce_loss(outputs, labels) * 1/3 + dice_loss(outputs, labels) * 2/3
+            combined_loss = multi_loss_fusion(outputs, labels)
 
         scaler.scale(combined_loss).backward()
         torch.nn.utils.clip_grad_norm_(
@@ -595,8 +590,8 @@ def main(rank, world_size):
         if rank == 0 and not os.path.exists("saved_models"):
             os.makedirs("saved_models")
 
-        tra_img_name_list, tra_lbl_name_list, tra_mask_name_list = load_dataset(
-            tra_image_dir, tra_label_dir, tra_mask_dir, ".*"
+        tra_img_name_list, tra_lbl_name_list = load_dataset(
+            tra_image_dir, tra_label_dir, ".*"
         )
 
         print(f"Images: {format(len(tra_img_name_list))}, masks: {len(tra_lbl_name_list)}")
@@ -617,17 +612,7 @@ def main(rank, world_size):
         elif TRAIN_U2NET_SOFTPLUS:
             net = U2NETPSerial()
         else:
-            net = SwinUnet(img_size=1024, num_classes=2, patch_size=4, window_size=8, in_chans=3)
-            # if HALF_PRECISION:
-            #     net = U2NET(IN_CHANNELS, OUT_CHANNELS).half()
-            # else:
-            #     net = U2NET(IN_CHANNELS, OUT_CHANNELS)
-        # print("Compiling model kernels")
-        # try:
-        #     net: nn.Module = torch.compile(net, mode="max-autotune")
-        #     print("Continuing setup")
-        # except RuntimeError:
-        #     print("Failed to compile model. This might be a little slower.")
+            net = U2NET(IN_CHANNELS, OUT_CHANNELS)
         net.to(device)
         net.train()
         optimizer = bnb.optim.AdamW8bit(
@@ -638,22 +623,23 @@ def main(rank, world_size):
 
         training_counts = load_checkpoint(net, optimizer, grad_scaler)
         net = torch.nn.parallel.DistributedDataParallel(net, device_ids=[rank])
-        # dealing with negative values, if model was trained for more epochs than in target:
-        for key, count in training_counts.items():
-            if targets[key] < count:
-                targets[key] = count
-            print(
-                f"Task: {train_configs[key]['name']:<17} Epochs done: {count}/{targets[key]}"
-            )
+        if rank == 0:
+            # dealing with negative values, if model was trained for more epochs than in target:
+            for key, count in training_counts.items():
+                if targets[key] < count:
+                    targets[key] = count
+                print(
+                    f"Task: {train_configs[key]['name']:<17} Epochs done: {count}/{targets[key]}"
+                )
 
-        print("———\n")
+            print("———\n")
 
         scheduler = CosineAnnealingLR(optimizer, T_max=sum(targets.values()), eta_min=1e-6)
 
         def create_and_train(transform, batch_size, epochs, train_type, train_count, train_target):
             """Creates a dataloader and trains the network using the given parameters."""
             dataloader = get_dataloader(
-                tra_img_name_list, tra_lbl_name_list, tra_mask_name_list, transform, batch_size, rank, world_size
+                tra_img_name_list, tra_lbl_name_list, transform, batch_size, rank, world_size
             )
             train_epochs(
                 net,

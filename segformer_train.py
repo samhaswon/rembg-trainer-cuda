@@ -10,10 +10,11 @@ import bitsandbytes as bnb
 import sys
 import torch
 from torch import nn
+import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from torchvision.transforms import transforms
-from transformers import SegformerModel
+from transformers import SegformerModel, Mask2FormerForUniversalSegmentation
 
 from data_loader import (
     SalObjDataset,
@@ -31,7 +32,7 @@ MAIN_SIZE = 1024
 OUT_CHANNELS = 1
 
 #: float16 if true, float32 if false
-USE_AMP = True
+USE_AMP = False
 
 # Defining BCE Loss for Binary Cross Entropy
 bce_loss = nn.BCEWithLogitsLoss(reduction="mean")
@@ -98,28 +99,51 @@ class BinarySegFormer(nn.Module):
         self.backbone = SegformerModel.from_pretrained(backbone, ignore_mismatched_sizes=True)
         self.size = size
         self.output_channels = output_channels
-        self.mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1).to("cuda")
-        self.std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1).to("cuda")
+        mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1)
+        self.register_buffer("mean", mean, persistent=False)
+        self.register_buffer("std", std, persistent=False)
 
         # dims = self.backbone.config.hidden_sizes
         dims = [size // 4 // (2 ** k) for k in range(4)]
         self.decode = nn.Sequential(
-            nn.Conv2d(sum(dims), 256, kernel_size=1, bias=False),
+            nn.Conv2d(sum(dims) + 3, 256, kernel_size=1, bias=False),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
             nn.Conv2d(256, output_channels, kernel_size=1)  # 1 logit
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        with torch.no_grad():
-            x = (x - self.mean) / self.std
+        x = (x - self.mean) / self.std
         feats = self.backbone(x, output_hidden_states=True).hidden_states
         feats = [nn.functional.interpolate(f.permute(0, 3, 1, 2), size=x.shape[-2:],
                                            mode="bilinear", align_corners=False)
                  for f in feats]
         fused = torch.cat(feats, dim=1)
+        fused = torch.cat((fused, x), dim=1)
         logit = self.decode(fused)
-        return logit  # apply BCEWithLogitsLoss during training
+        return F.sigmoid(logit)  # apply BCEWithLogitsLoss during training
+
+
+def dice_loss(predict, target, smooth=1.0):
+    """
+    Calculates the Dice Loss.
+
+
+    Returns:
+        float: Dice Loss value.
+    """
+    predict = predict.contiguous()
+    target = target.contiguous()
+
+    intersection = (predict * target).sum(dim=2).sum(dim=2)
+
+    loss = 1 - (
+        (2.0 * intersection + smooth)
+        / (predict.sum(dim=2).sum(dim=2) + target.sum(dim=2).sum(dim=2) + smooth)
+    )
+
+    return loss.mean()
 
 
 def get_args():
@@ -342,6 +366,28 @@ def load_dataset(img_dir, lbl_dir, ext):
     return img_list, lbl_list
 
 
+def multi_loss_fusion(d_list, labels_v):
+    """
+    Combines BCE and Dice losses. Gives more weight to dice loss.
+
+    Parameters:
+        d_list (list): List of predicted outputs.
+        labels_v (Tensor): Ground truth/target outputs.
+
+    Returns:
+        float: Combined loss value.
+    """
+    bce_losses = [bce_loss(d, labels_v) for d in d_list]
+    dice_losses = [dice_loss(d, labels_v) for d in d_list]
+    w_bce, w_dice = 1 / 3, 2 / 3
+    combined_losses = [
+        w_bce * bce + w_dice * dice for bce, dice in zip(bce_losses, dice_losses)
+    ]
+    total_loss = sum(combined_losses)
+    # return combined_losses[0], total_loss
+    return total_loss
+
+
 def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
     """
     Creates a DataLoader for the dataset.
@@ -368,8 +414,8 @@ def get_dataloader(tra_img_name_list, tra_lbl_name_list, transform, batch_size):
     dataloader = DataLoader(
         dataset, batch_size=max(1, int(batch_size)),
         shuffle=True, num_workers=cores,
-        persistent_workers=True if cores > 0 else False,
-        pin_memory=True, prefetch_factor=cores
+        # persistent_workers=True if cores > 0 else False,
+        # pin_memory=True, prefetch_factor=cores
     )
 
     return dataloader
@@ -398,7 +444,8 @@ def train_model(net, optimizer, scheduler, dataloader, device, scaler):
 
         with torch.autocast(device_type=device.__str__(), dtype=torch.float16, enabled=USE_AMP):
             outputs = net(inputs)
-            combined_loss = bce_loss(outputs, labels)
+            # combined_loss = bce_loss(outputs, labels)
+            combined_loss = bce_loss(outputs, labels) * 0.5 + dice_loss(outputs, labels) * 0.5
 
         scaler.scale(combined_loss).backward()
         torch.nn.utils.clip_grad_norm_(
@@ -511,6 +558,11 @@ def main():
         return
 
     net = BinarySegFormer(size=MAIN_SIZE, output_channels=OUT_CHANNELS)
+    # net = Mask2FormerForUniversalSegmentation.from_pretrained(
+    #     "facebook/mask2former-swin-base-ade-semantic",
+    #     num_labels=1,
+    #     ignore_mismatched_sizes=True
+    # )
     net.to(device)
     net.train()
 
@@ -530,6 +582,10 @@ def main():
         )
 
     print("———\n")
+
+    # freeze everything in the encoder
+    # for p in net.backbone.parameters():
+    #     p.requires_grad = False
 
     scheduler = CosineAnnealingLR(optimizer, T_max=sum(targets.values()), eta_min=1e-6)
 

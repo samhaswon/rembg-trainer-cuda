@@ -64,29 +64,33 @@ class BiRefNet(
         self.on_devices = False
 
     def to_devices(self):
-        self.bb = self.bb.to("cuda:1")
+        self.bb = self.bb.to("cuda:0")
         # self.cls_head = self.cls_head.to("cuda:1")
         self.squeeze_module = self.squeeze_module.to("cuda:1")
-        self.decoder.to_devices()
+        self.decoder.to("cuda:1")
         self.on_devices = True
 
     def forward_enc(self, x):
-        if self.config.bb in ['vgg16', 'vgg16bn', 'resnet50']:
-            x1 = self.bb.conv1(x); x2 = self.bb.conv2(x1); x3 = self.bb.conv3(x2); x4 = self.bb.conv4(x3)
-        else:
-            x1, x2, x3, x4 = self.bb(x)
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.on_devices):
+            if self.config.bb in ['vgg16', 'vgg16bn', 'resnet50']:
+                x1 = self.bb.conv1(x); x2 = self.bb.conv2(x1); x3 = self.bb.conv3(x2); x4 = self.bb.conv4(x3)
+            else:
+                x1, x2, x3, x4 = self.bb(x)
         if self.config.mul_scl_ipt:
             B, C, H, W = x.shape
             x_pyramid = F.interpolate(x, size=(H//2, W//2), mode='bilinear', align_corners=True)
             if self.config.mul_scl_ipt == 'cat':
-                if self.config.bb in ['vgg16', 'vgg16bn', 'resnet50']:
-                    x1_ = self.bb.conv1(x_pyramid); x2_ = self.bb.conv2(x1_); x3_ = self.bb.conv3(x2_); x4_ = self.bb.conv4(x3_)
-                else:
-                    x1_, x2_, x3_, x4_ = self.bb(x_pyramid)
+                with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.on_devices):
+                    if self.config.bb in ['vgg16', 'vgg16bn', 'resnet50']:
+                        x1_ = self.bb.conv1(x_pyramid); x2_ = self.bb.conv2(x1_); x3_ = self.bb.conv3(x2_); x4_ = self.bb.conv4(x3_)
+                    else:
+                        x1_, x2_, x3_, x4_ = self.bb(x_pyramid)
                 x1 = torch.cat([x1, F.interpolate(x1_, size=x1.shape[2:], mode='bilinear', align_corners=True)], dim=1)
                 x2 = torch.cat([x2, F.interpolate(x2_, size=x2.shape[2:], mode='bilinear', align_corners=True)], dim=1)
                 x3 = torch.cat([x3, F.interpolate(x3_, size=x3.shape[2:], mode='bilinear', align_corners=True)], dim=1)
                 x4 = torch.cat([x4, F.interpolate(x4_, size=x4.shape[2:], mode='bilinear', align_corners=True)], dim=1)
+                if self.on_devices:
+                    x1, x2, x3, x4 = x1.to("cuda:1"), x2.to("cuda:1"), x3.to("cuda:1"), x4.to("cuda:1")
             elif self.config.mul_scl_ipt == 'add':
                 x1_, x2_, x3_, x4_ = self.bb(x_pyramid)
                 x1 = x1 + F.interpolate(x1_, size=x1.shape[2:], mode='bilinear', align_corners=True)
@@ -110,9 +114,11 @@ class BiRefNet(
 
     def forward_ori(self, x):
         if self.on_devices:
-            x = x.to("cuda:1")
+            x = x.to("cuda:0")
         ########## Encoder ##########
         (x1, x2, x3, x4), class_preds = self.forward_enc(x)
+        if self.on_devices:
+            x = x.to("cuda:1")
         if self.config.squeeze_block:
             x4 = self.squeeze_module(x4)
         ########## Decoder ##########
@@ -330,13 +336,21 @@ class SimpleConvs(nn.Module):
 
 if __name__ == '__main__':
     from fvcore.nn import FlopCountAnalysis
+    import time
 
     net = BiRefNet(bb_pretrained=False)
     net.eval()
 
-    test_tensor = torch.rand(1, 3, 2048, 2048)
+    test_tensor = torch.rand(1, 3, 256, 256)
     flops = FlopCountAnalysis(net, (test_tensor,))
     print(f"{flops.total() = :,}")
 
     param_count = sum(p.numel() for p in net.parameters() if p.requires_grad)
     print(f"{param_count=:,}")
+
+    start = time.perf_counter()
+    for _ in range(10):
+        net(test_tensor)
+    end = time.perf_counter()
+    print(f"Time taken: {end - start:0.4f} seconds\n"
+          f"{(end - start) / 10:0.4f} iterations per second")

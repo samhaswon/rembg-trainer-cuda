@@ -87,6 +87,9 @@ class SwinUnet(nn.Module):
 
 if __name__ == '__main__':
     x = torch.randn((2, 3, 1024, 1024))
-    net = SwinUnet(img_size=1024, num_classes=2, patch_size=4, window_size=8, in_chans=3, mlp_ratio=4.0)
+    net = SwinUnet(
+        img_size=1024, num_classes=1, patch_size=4,
+        window_size=8, in_chans=3, mlp_ratio=4.0
+    )
     out = net(x)
     print(out.shape)

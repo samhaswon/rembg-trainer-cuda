@@ -266,7 +266,7 @@ def split_pairs(pairs: List[Tuple[Path, Path]], eval_size: int, seed: int) -> Tu
 
 def compute_seg_metrics(eval_pred, label_ids) -> dict:
     # eval_pred.predictions and eval_pred.label_ids are numpy arrays
-    preds = torch.tensor(eval_pred[0])   # (N, 1, H, W)
+    preds = torch.tensor(eval_pred)   # (N, 1, H, W)
     labels = torch.tensor(label_ids)    # (N, 1, H, W)
 
     preds = torch.sigmoid(preds)
@@ -385,7 +385,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.benchmark = False
     args = parse_args()
     torch.manual_seed(args.seed)
 
@@ -417,8 +417,7 @@ def main() -> None:
         eps=1e-08,
         weight_decay=0,
     )
-    epochs_done = load_checkpoint(model, optimizer, filename="saved_models/checkpoint_1.pth.tar")
-    epochs_done = 2
+    epochs_done = load_checkpoint(model, optimizer, filename="saved_models/checkpoint_14.pth.tar")
     epochs_left = args.num_train_epochs - epochs_done
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs_left, eta_min=1e-6)
     criterion = BCEPlusDice()
@@ -437,7 +436,7 @@ def main() -> None:
         train_progress_bar = tqdm(total=len(train_ds), desc=f"Training [{i + 1}/{epochs_left}]")
         for data in train_ds:
             inputs = data["pixel_values"]
-            labels = data["labels"].to("cuda:0", non_blocking=True)
+            labels = data["labels"].to("cuda:1", non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
             outputs = model(inputs)
@@ -458,7 +457,7 @@ def main() -> None:
                 "state_dict": model.state_dict(),
                 "optimizer": optimizer.state_dict(),
             },
-            f"saved_models/checkpoint_{i + 1}.pth.tar",
+            f"saved_models/checkpoint_{epochs_done + i + 1}.pth.tar",
         )
         eval_progress_bar = tqdm(total=len(eval_ds), desc=f"Evaluating [{i + 1}/{epochs_left}]")
         eval_results = {"mae": 0.0, "iou50": 0.0, "dice": 0.0}
