@@ -3,6 +3,8 @@ import torch
 from torch import nn
 from torchvision.models.segmentation import deeplabv3_mobilenet_v3_large
 from model import U2NET, U2NETP
+from model.sunet import StraightU2Net
+from model import BiRefNet
 
 
 class DeepLabV3MobileNetV3(nn.Module):
@@ -45,6 +47,8 @@ if __name__ == '__main__':
     model = U2NET(3, 1).eval()
     model_p = U2NETP(3, 1).eval()
     model_dlmv = DeepLabV3MobileNetV3(num_classes=1).eval()
+    model_sunet = StraightU2Net(in_ch=3, out_ch=1, base_ch=32, mid_ch=16, num_blocks=2, dropout=0.05).eval()
+    # model_birefnet = BiRefNet(bb_pretrained=False).eval()
 
     inputs = {
         "256x256": test_256,
@@ -60,16 +64,12 @@ if __name__ == '__main__':
         "U2NET": model,
         "U2NETP": model_p,
         "DeepLabV3MobileNetV3": model_dlmv,
+        "StraightU2Net": model_sunet,
+        # "BiRefNet_lite": model_birefnet,
     }
-    # print("\nCompiling models", end="")
-    # for model_name, mdl in models.copy().items():
-    #     models[model_name + " Compiled"] = torch.compile(mdl, mode="max-autotune-no-cudagraphs").eval()
-    #     print(".", end="")
-    # print()
 
     for model_name, mdl in models.items():
         print(f"\n=== {model_name} ===")
-        # with torch.inference_mode():
         for size_name, inp in inputs.items():
             # Warm-up to avoid measuring lazy init cost
             _ = mdl(inp)
@@ -84,7 +84,6 @@ if __name__ == '__main__':
 
     for model_name, mdl in models.items():
         print(f"\n=== {model_name} (`torch.compile`) ===")
-        # with torch.inference_mode():
         for size_name, inp in inputs.items():
             # Warm-up to avoid measuring lazy init cost
             mdl_c = torch.compile(mdl, mode="max-autotune-no-cudagraphs").eval()
@@ -97,3 +96,34 @@ if __name__ == '__main__':
 
             avg_time = (end - start) / ITERATIONS
             print(f"{size_name}: {avg_time:.4f} seconds per inference")
+
+    for model_name, mdl in models.items():
+        print(f"\n=== {model_name} (`inference_mode`) ===")
+        with torch.inference_mode():
+            for size_name, inp in inputs.items():
+                # Warm-up to avoid measuring lazy init cost
+                _ = mdl(inp)
+
+                start = time.perf_counter()
+                for _ in range(ITERATIONS):
+                    _ = mdl(inp)
+                end = time.perf_counter()
+
+                avg_time = (end - start) / ITERATIONS
+                print(f"{size_name}: {avg_time:.4f} seconds per inference")
+
+    for model_name, mdl in models.items():
+        print(f"\n=== {model_name} (`torch.compile`, `inference_mode`) ===")
+        with torch.inference_mode():
+            for size_name, inp in inputs.items():
+                # Warm-up to avoid measuring lazy init cost
+                mdl_c = torch.compile(mdl, mode="max-autotune-no-cudagraphs").eval()
+                _ = mdl_c(inp)
+
+                start = time.perf_counter()
+                for _ in range(ITERATIONS):
+                    _ = mdl_c(inp)
+                end = time.perf_counter()
+
+                avg_time = (end - start) / ITERATIONS
+                print(f"{size_name}: {avg_time:.4f} seconds per inference")
