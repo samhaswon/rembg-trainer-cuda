@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from kornia.filters import laplacian
 from huggingface_hub import PyTorchModelHubMixin
+from torch.utils.flop_counter import FlopCounterMode
 
 from model.config import Config
 from model.models.backbones.build_backbone import build_backbone
@@ -334,19 +335,39 @@ class SimpleConvs(nn.Module):
         return self.conv_out(self.conv1(x))
 
 
+def count_flops_forward(model: torch.nn.Module, *inputs, **kwargs) -> int:
+    """
+    Counts the FLOPs for the forward pass of a model.
+    :param model: The model to evaluate.
+    :param inputs: The inputs to the model.
+    :param kwargs: Keyword arguments for the model.
+    :returns: The number of FLOPs for the forward pass.
+    """
+    model.eval()
+    # Use no_grad, not inference_mode (FlopCounterMode can report 0 under inference_mode).
+    # See PyTorch issue discussion for details.
+    with torch.no_grad():
+        flop_counter = FlopCounterMode(display=False)
+        with flop_counter:
+            _ = model(*inputs, **kwargs)
+    return int(flop_counter.get_total_flops())
+
+
 if __name__ == '__main__':
-    from fvcore.nn import FlopCountAnalysis
     import time
 
     net = BiRefNet(bb_pretrained=False)
     net.eval()
 
-    test_tensor = torch.rand(1, 3, 256, 256)
-    flops = FlopCountAnalysis(net, (test_tensor,))
-    print(f"{flops.total() = :,}")
+    test_tensor = torch.rand(1, 3, 1024, 1024)
+    flops = count_flops_forward(net, test_tensor)
+    print(f"FLOPs: {flops:,}")
 
     param_count = sum(p.numel() for p in net.parameters() if p.requires_grad)
     print(f"{param_count=:,}")
+
+    net = torch.compile(net, mode="max-autotune-no-cudagraphs").eval()
+    _ = net(test_tensor)
 
     start = time.perf_counter()
     for _ in range(10):
