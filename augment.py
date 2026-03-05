@@ -184,7 +184,9 @@ def augment_image(img_path: str, msk_path: str, augment_num: int):
     # Hue augmentation
     result = image
     for _ in range(6):
-        result = hue_rotation(result)
+        # Random jitter for rotation amount
+        jitter = random.randint(-5, 5)
+        result = hue_rotation(result, rotation=25 + jitter)
         save_img(result, filename=img_path, augment_num=augment_num)
         augment_num += 1
 
@@ -277,6 +279,11 @@ if __name__ == "__main__":
     augment_count = 26
     image_list = [x for x in os.listdir("./images") if x.endswith("png")]  # [:4]
     mask_list = [x for x in os.listdir("./masks") if x.endswith("png")]  # [:4]
+    image_list.sort()
+    mask_list.sort()
+
+    image_list = image_list[:1134]
+    mask_list = mask_list[:1134]
 
     print(f"Found {len(image_list)} images.")
 
