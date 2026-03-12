@@ -49,7 +49,7 @@ def _is_image(path: Path) -> bool:
     return path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
 
-def list_pairs(root: Path) -> List[Tuple[Path, Path]]:
+def list_pairs(root: Path, images_name: str = "images", masks_name: str = "masks") -> List[Tuple[Path, Path]]:
     """
     List (image, mask) pairs by matching filenames in two folders.
 
@@ -57,14 +57,18 @@ def list_pairs(root: Path) -> List[Tuple[Path, Path]]:
     ----------
     root : Path
         Root folder containing 'images' and 'masks'.
+    images_name : str, optional
+        The name of the folder containing images
+    masks_name : str, optional
+        The name of the folder containing masks.
 
     Returns
     -------
     list[tuple[Path, Path]]
         Sorted list of pairs.
     """
-    img_dir = root / "images"
-    msk_dir = root / "masks"
+    img_dir = root / images_name
+    msk_dir = root / masks_name
     if not img_dir.is_dir() or not msk_dir.is_dir():
         raise FileNotFoundError("Expected subfolders 'images' and 'masks' under data_root.")
 
@@ -179,9 +183,17 @@ class FolderSegDataset(Dataset):
     Simple folder dataset for image segmentation with soft masks.
     """
 
-    def __init__(self, pairs: List[Tuple[Path, Path]], image_size: int) -> None:
+    def __init__(
+        self,
+        pairs: List[Tuple[Path, Path]],
+        image_size: int,
+        gaussian_noise_std: float = 0.0,
+        gaussian_noise_prob: float = 0.0,
+    ) -> None:
         self.pairs = pairs
         self.image_size = image_size
+        self.gaussian_noise_std = max(0.0, float(gaussian_noise_std))
+        self.gaussian_noise_prob = float(min(1.0, max(0.0, gaussian_noise_prob)))
 
     def __len__(self) -> int:
         return len(self.pairs)
@@ -196,6 +208,10 @@ class FolderSegDataset(Dataset):
 
         img_sq = resize_and_pad_square(img, target)
         msk_sq = resize_and_pad_square(msk, target)
+
+        if self.gaussian_noise_std > 0.0 and torch.rand(1).item() < self.gaussian_noise_prob:
+            noise = torch.randn_like(img_sq) * self.gaussian_noise_std
+            img_sq = (img_sq + noise).clamp(0.0, 1.0)
         # masks with nearest, same final size
 
         return {"pixel_values": img_sq, "labels": msk_sq, "id": ip.name}
@@ -381,25 +397,36 @@ def main() -> None:
     torch.backends.cudnn.benchmark = False
     args = parse_args()
     torch.manual_seed(args.seed)
+    torch.multiprocessing.set_start_method("spawn")
 
     pairs = list_pairs(Path(args.data_root))
     # train_pairs, eval_pairs = split_pairs(pairs, eval_size=args.eval_subset, seed=args.seed)
     train_pairs = pairs
-    eval_pairs = pairs[:100]
+    eval_pairs = list_pairs(Path(args.data_root), images_name="eval_images", masks_name="eval_masks")
 
     train_ds = DataLoader(
-        FolderSegDataset(train_pairs, image_size=args.image_size),
+        FolderSegDataset(
+            train_pairs,
+            image_size=args.image_size,
+            gaussian_noise_std=0.02,
+            gaussian_noise_prob=0.35,
+        ),
         batch_size=args.per_device_train_batch_size,
         shuffle=True,
-        pin_memory=True,
-        num_workers=4,
+        pin_memory=False,
+        num_workers=8,
     )
     eval_ds = DataLoader(
-        FolderSegDataset(eval_pairs, image_size=args.image_size),
+        FolderSegDataset(
+            eval_pairs,
+            image_size=args.image_size,
+            gaussian_noise_std=0.0,
+            gaussian_noise_prob=0.0,
+        ),
         batch_size=args.per_device_eval_batch_size,
         shuffle=False,
-        pin_memory=True,
-        num_workers=4,
+        pin_memory=False,
+        num_workers=8,
     )
 
     cfg = SkinSegFormerConfig(
@@ -475,7 +502,7 @@ def main() -> None:
         eval_results["mae"] = eval_results["mae"] / (len(eval_ds) // args.per_device_eval_batch_size)
         eval_results["iou50"] = eval_results["iou50"] / (len(eval_ds) // args.per_device_eval_batch_size)
         eval_results["dice"] = eval_results["dice"] / (len(eval_ds) // args.per_device_eval_batch_size)
-        print(f"Epoch {i + 1} eval: {eval_results}")
+        print(f"Epoch {i + 1 + epochs_done} eval: {eval_results}")
 
 
 if __name__ == "__main__":
