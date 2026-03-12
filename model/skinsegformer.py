@@ -202,6 +202,110 @@ class BiRefineDecoderBlock(nn.Module):
         return xg, xd
 
 
+class TopKMoEMLP(nn.Module):
+    """
+    Top-k routed MoE MLP:
+    - increases parameters with more experts
+    - keeps token compute controlled by limiting experts per token
+    """
+    def __init__(
+        self,
+        dim: int,
+        num_experts: int,
+        top_k: int = 2,
+        mlp_ratio: float = 1.75,
+        drop: float = 0.0,
+    ) -> None:
+        super().__init__()
+        if num_experts < 1:
+            raise ValueError("num_experts must be >= 1.")
+        if top_k < 1:
+            raise ValueError("top_k must be >= 1.")
+        self.num_experts = num_experts
+        self.top_k = min(top_k, num_experts)
+        self.gate = nn.Linear(dim, num_experts, bias=True)
+        self.experts = nn.ModuleList([
+            MLP(dim, mlp_ratio=mlp_ratio, drop=drop)
+            for _ in range(num_experts)
+        ])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        bsz, n, dim = x.shape
+        gate_logits = self.gate(x)  # (B, N, E)
+        topk_logits, topk_idx = torch.topk(gate_logits, k=self.top_k, dim=-1)  # (B,N,K), (B,N,K)
+        topk_weight = topk_logits.softmax(dim=-1)  # normalize over selected experts only
+
+        x_flat = x.reshape(-1, dim)
+        out_flat = torch.zeros_like(x_flat)
+        idx_flat = topk_idx.reshape(-1, self.top_k)
+        weight_flat = topk_weight.reshape(-1, self.top_k)
+
+        for expert_id, expert in enumerate(self.experts):
+            mask = idx_flat == expert_id  # (T, K)
+            if mask.any():
+                token_ids, slot_ids = mask.nonzero(as_tuple=True)
+                expert_out = expert(x_flat[token_ids])
+                expert_weight = weight_flat[token_ids, slot_ids].unsqueeze(-1)
+                out_flat.index_add_(0, token_ids, expert_out * expert_weight)
+
+        return out_flat.view(bsz, n, dim)
+
+
+class BiRefineMoEDecoderBlock(nn.Module):
+    """
+    BiRefine block with MoE MLPs in both streams.
+    """
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        num_experts: int,
+        moe_top_k: int = 2,
+        moe_mlp_ratio: float = 1.75,
+        drop: float = 0.0,
+        attn_drop: float = 0.0,
+        use_rmsnorm: bool = True,
+    ) -> None:
+        super().__init__()
+        norm = RMSNorm if use_rmsnorm else nn.LayerNorm
+
+        self.g_norm1 = norm(dim)
+        self.g_self = MultiheadSelfAttention(dim, num_heads, attn_drop=attn_drop, proj_drop=drop)
+        self.g_norm2 = norm(dim)
+        self.g_xattn = MultiheadCrossAttention(dim, num_heads, attn_drop=attn_drop, proj_drop=drop)
+        self.g_norm3 = norm(dim)
+        self.g_moe = TopKMoEMLP(
+            dim,
+            num_experts=num_experts,
+            top_k=moe_top_k,
+            mlp_ratio=moe_mlp_ratio,
+            drop=drop,
+        )
+
+        self.d_norm1 = norm(dim)
+        self.d_self = MultiheadSelfAttention(dim, num_heads, attn_drop=attn_drop, proj_drop=drop)
+        self.d_norm2 = norm(dim)
+        self.d_xattn = MultiheadCrossAttention(dim, num_heads, attn_drop=attn_drop, proj_drop=drop)
+        self.d_norm3 = norm(dim)
+        self.d_moe = TopKMoEMLP(
+            dim,
+            num_experts=num_experts,
+            top_k=moe_top_k,
+            mlp_ratio=moe_mlp_ratio,
+            drop=drop,
+        )
+
+    def forward(self, xg: torch.Tensor, xd: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        xg = xg + self.g_self(self.g_norm1(xg))
+        xg = xg + self.g_xattn(self.g_norm2(xg), ctx=xd)
+        xg = xg + self.g_moe(self.g_norm3(xg))
+
+        xd = xd + self.d_self(self.d_norm1(xd))
+        xd = xd + self.d_xattn(self.d_norm2(xd), ctx=xg)
+        xd = xd + self.d_moe(self.d_norm3(xd))
+        return xg, xd
+
+
 class PatchEmbed(nn.Module):
     """
     Patchify a 512x512 canvas into (H/P)*(W/P) tokens.
@@ -499,14 +603,28 @@ class TransformerDecoder(nn.Module):
         mlp_ratio: float,
         drop: float,
         attn_drop: float,
+        moe_depth: int,
+        num_experts: int,
+        moe_top_k: int = 2,
+        moe_mlp_ratio: float = 1.75,
         use_rmsnorm: bool = True,
         grad_checkpointing: bool = False,
     ) -> None:
         super().__init__()
+        if moe_depth < 0:
+            raise ValueError("moe_depth must be >= 0.")
         self.grad_checkpointing = grad_checkpointing
         self.enc_to_dec = nn.Linear(enc_dim, dec_dim, bias=True)
 
-        self.blocks = nn.ModuleList([
+        # Keep MoE blocks wrapped by dense blocks: at least one dense at input and output.
+        max_sparse_depth = max(0, depth - 2)
+        sparse_depth = min(moe_depth, max_sparse_depth)
+        leading_dense = 1 if sparse_depth > 0 else 0
+        trailing_dense = 1 if sparse_depth > 0 else 0
+        middle_dense = depth - sparse_depth - leading_dense - trailing_dense
+
+        blocks = []
+        blocks.extend([
             BiRefineDecoderBlock(
                 dim=dec_dim,
                 num_heads=num_heads,
@@ -515,8 +633,34 @@ class TransformerDecoder(nn.Module):
                 attn_drop=attn_drop,
                 use_rmsnorm=use_rmsnorm,
             )
-            for _ in range(depth)
+            for _ in range(leading_dense)
         ])
+        blocks.extend([
+            BiRefineMoEDecoderBlock(
+                dim=dec_dim,
+                num_heads=num_heads,
+                num_experts=num_experts,
+                moe_top_k=moe_top_k,
+                moe_mlp_ratio=moe_mlp_ratio,
+                drop=drop,
+                attn_drop=attn_drop,
+                use_rmsnorm=use_rmsnorm,
+            )
+            for _ in range(sparse_depth)
+        ])
+        blocks.extend([
+            BiRefineDecoderBlock(
+                dim=dec_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                drop=drop,
+                attn_drop=attn_drop,
+                use_rmsnorm=use_rmsnorm,
+            )
+            for _ in range(middle_dense + trailing_dense)
+        ])
+
+        self.blocks = nn.ModuleList(blocks)
         self.norm = (RMSNorm(dec_dim) if use_rmsnorm else nn.LayerNorm(dec_dim))
 
     def forward(self, x_enc: torch.Tensor, x_detail: torch.Tensor) -> torch.Tensor:
@@ -550,11 +694,16 @@ class SkinSegFormerConfig:
     # Decoder (transformer-based)
     dec_dim: int = 256
     dec_depth: int = 6
+    # The MoE depth is at most dec_depth - 2, as the MoE blocks are wrapped in dense layers.
+    dec_moe_depth: int = 4
     dec_heads: int = 8
     dec_mlp_ratio: float = 4.0
+    dec_num_experts: int = 8
+    dec_moe_top_k: int = 2
+    dec_moe_mlp_ratio: float = 1.75
 
-    drop: float = 0.0
-    attn_drop: float = 0.0
+    drop: float = 0.05
+    attn_drop: float = 0.01
 
     use_abs_pos: bool = True
     use_rmsnorm: bool = True
@@ -568,6 +717,11 @@ class SkinSegFormer(nn.Module):
     def __init__(self, cfg: SkinSegFormerConfig) -> None:
         super().__init__()
         self.cfg = cfg
+
+        mean_t = torch.tensor([0.4956035, 0.45403906, 0.4229], dtype=torch.float32).view(1, -1, 1, 1)
+        std_t = torch.tensor([0.35209113, 0.32731546, 0.32717964], dtype=torch.float32).view(1, -1, 1, 1)
+        self.register_buffer("mean", mean_t)
+        self.register_buffer("std", std_t)
 
         self.canvas = InterpCanvasProjector(cfg.in_chans, stem_ch=64)
 
@@ -597,6 +751,10 @@ class SkinSegFormer(nn.Module):
             mlp_ratio=cfg.dec_mlp_ratio,
             drop=cfg.drop,
             attn_drop=cfg.attn_drop,
+            moe_depth=cfg.dec_moe_depth,
+            num_experts=cfg.dec_num_experts,
+            moe_top_k=cfg.dec_moe_top_k,
+            moe_mlp_ratio=cfg.dec_moe_mlp_ratio,
             use_rmsnorm=cfg.use_rmsnorm,
             grad_checkpointing=cfg.grad_checkpointing,
         )
@@ -619,7 +777,7 @@ class SkinSegFormer(nn.Module):
         if not (h == w == 512 or h == w == 1024):
             raise ValueError(f"Only 512x512 or 1024x1024 supported, got {h}x{w}.")
 
-        x_512, feat_mid = self.canvas(x)
+        x_512, feat_mid = self.canvas((x - self.mean) / self.std)
         x_enc = self.encoder(x_512)
         x_detail = self.detail(feat_mid)
         x_dec = self.decoder(x_enc, x_detail)
