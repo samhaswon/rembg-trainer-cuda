@@ -593,6 +593,32 @@ class DetailTokenExtractor(nn.Module):
         return x
 
 
+class InputSkipTokenProjector(nn.Module):
+    """
+    Direct skip path from normalized input to decoder token space.
+    Uses a fixed 1024 canvas, then pools to token grid to keep compute low.
+    """
+    def __init__(self, in_chans: int, out_dim: int, token_grid: int = 32) -> None:
+        super().__init__()
+        self.token_grid = token_grid
+        self.proj = nn.Conv2d(in_chans, out_dim, kernel_size=1, stride=1, padding=0, bias=True)
+
+    def forward(self, x_norm: torch.Tensor) -> torch.Tensor:
+        h, w = x_norm.shape[-2:]
+        if (h, w) == (1024, 1024):
+            x_1024 = x_norm
+        elif (h, w) == (512, 512):
+            x_1024 = F.interpolate(x_norm, size=(1024, 1024), mode="bilinear", align_corners=False)
+        else:
+            raise ValueError(f"Only 512x512 or 1024x1024 supported, got {h}x{w}.")
+
+        x = F.adaptive_avg_pool2d(x_1024, output_size=(self.token_grid, self.token_grid))
+        x = self.proj(x)
+        bsz, dim, ht, wt = x.shape
+        x = x.flatten(2).transpose(1, 2).contiguous()
+        return x
+
+
 class TransformerDecoder(nn.Module):
     def __init__(
         self,
@@ -724,6 +750,7 @@ class SkinSegFormer(nn.Module):
         self.register_buffer("std", std_t)
 
         self.canvas = InterpCanvasProjector(cfg.in_chans, stem_ch=64)
+        token_grid = 512 // cfg.patch_size
 
         # ViT runs on the 512x512 canvas features (64 channels).
         self.encoder = ViTEncoder(
@@ -742,6 +769,12 @@ class SkinSegFormer(nn.Module):
 
         # Detail tokens come from high-res stem features (64 channels) to match token grid.
         self.detail = DetailTokenExtractor(in_chans=64, out_dim=cfg.dec_dim, patch_size=cfg.patch_size)
+        self.input_skip = InputSkipTokenProjector(
+            in_chans=cfg.in_chans,
+            out_dim=cfg.dec_dim,
+            token_grid=token_grid,
+        )
+        self.detail_fuse_norm = (RMSNorm(cfg.dec_dim) if cfg.use_rmsnorm else nn.LayerNorm(cfg.dec_dim))
 
         self.decoder = TransformerDecoder(
             enc_dim=cfg.enc_dim,
@@ -762,7 +795,7 @@ class SkinSegFormer(nn.Module):
         self.head = MidResRefineHead(
             dec_dim=cfg.dec_dim,
             num_classes=cfg.num_classes,
-            patch_grid=32,
+            patch_grid=token_grid,
             mid_feat_ch=64,
             fuse_ch=128,
             refine_blocks=2,
@@ -777,9 +810,12 @@ class SkinSegFormer(nn.Module):
         if not (h == w == 512 or h == w == 1024):
             raise ValueError(f"Only 512x512 or 1024x1024 supported, got {h}x{w}.")
 
-        x_512, feat_mid = self.canvas((x - self.mean) / self.std)
+        x_norm = (x - self.mean) / self.std
+        x_512, feat_mid = self.canvas(x_norm)
         x_enc = self.encoder(x_512)
         x_detail = self.detail(feat_mid)
+        x_skip = self.input_skip(x_norm)
+        x_detail = self.detail_fuse_norm(x_detail + x_skip)
         x_dec = self.decoder(x_enc, x_detail)
         logits = self.head(x_dec, feat_mid, out_hw=(h, w))
         return logits
