@@ -394,10 +394,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.benchmark = True
     args = parse_args()
     torch.manual_seed(args.seed)
-    torch.multiprocessing.set_start_method("spawn")
+    torch.multiprocessing.set_start_method("fork")
 
     pairs = list_pairs(Path(args.data_root))
     # train_pairs, eval_pairs = split_pairs(pairs, eval_size=args.eval_subset, seed=args.seed)
