@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 import time
 from typing import Tuple
@@ -215,6 +217,8 @@ class TopKMoEMLP(nn.Module):
         top_k: int = 2,
         mlp_ratio: float = 1.75,
         drop: float = 0.0,
+        router_jitter: float = 0.0,
+        router_temperature: float = 1.0,
     ) -> None:
         super().__init__()
         if num_experts < 1:
@@ -223,17 +227,27 @@ class TopKMoEMLP(nn.Module):
             raise ValueError("top_k must be >= 1.")
         self.num_experts = num_experts
         self.top_k = min(top_k, num_experts)
+        self.router_jitter = max(0.0, float(router_jitter))
+        self.router_temperature = max(1e-3, float(router_temperature))
         self.gate = nn.Linear(dim, num_experts, bias=True)
         self.experts = nn.ModuleList([
             MLP(dim, mlp_ratio=mlp_ratio, drop=drop)
             for _ in range(num_experts)
         ])
+        self.last_aux_loss: torch.Tensor | None = None
+        self.last_importance: torch.Tensor | None = None
+        self.last_load: torch.Tensor | None = None
+        self.last_entropy: torch.Tensor | None = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bsz, n, dim = x.shape
         gate_logits = self.gate(x)  # (B, N, E)
-        topk_logits, topk_idx = torch.topk(gate_logits, k=self.top_k, dim=-1)  # (B,N,K), (B,N,K)
-        topk_weight = topk_logits.softmax(dim=-1)  # normalize over selected experts only
+        if self.training and self.router_jitter > 0.0:
+            gate_logits = gate_logits + torch.randn_like(gate_logits) * self.router_jitter
+
+        router_probs = (gate_logits / self.router_temperature).softmax(dim=-1)
+        topk_prob, topk_idx = torch.topk(router_probs, k=self.top_k, dim=-1)  # (B,N,K), (B,N,K)
+        topk_weight = topk_prob / topk_prob.sum(dim=-1, keepdim=True).clamp_min(1e-9)
 
         x_flat = x.reshape(-1, dim)
         out_flat = torch.zeros_like(x_flat)
@@ -248,6 +262,16 @@ class TopKMoEMLP(nn.Module):
                 expert_weight = weight_flat[token_ids, slot_ids].unsqueeze(-1)
                 out_flat.index_add_(0, token_ids, expert_out * expert_weight)
 
+        importance = router_probs.mean(dim=(0, 1))
+        load = F.one_hot(topk_idx, num_classes=self.num_experts).float().sum(dim=(0, 1, 2))
+        load = load / load.sum().clamp_min(1.0)
+        entropy = -(router_probs * router_probs.clamp_min(1e-9).log()).sum(dim=-1).mean()
+        aux_loss = self.num_experts * torch.sum(importance * load)
+
+        self.last_aux_loss = aux_loss
+        self.last_importance = importance.detach()
+        self.last_load = load.detach()
+        self.last_entropy = entropy.detach()
         return out_flat.view(bsz, n, dim)
 
 
@@ -260,27 +284,37 @@ class BiRefineMoEDecoderBlock(nn.Module):
         dim: int,
         num_heads: int,
         num_experts: int,
-        moe_top_k: int = 2,
+        moe_top_k_global: int = 2,
+        moe_top_k_detail: int = 1,
         moe_mlp_ratio: float = 1.75,
         drop: float = 0.0,
         attn_drop: float = 0.0,
         use_rmsnorm: bool = True,
+        router_jitter: float = 0.0,
+        router_temperature: float = 1.0,
+        use_global_moe: bool = False,
     ) -> None:
         super().__init__()
         norm = RMSNorm if use_rmsnorm else nn.LayerNorm
+        self.use_global_moe = use_global_moe
 
         self.g_norm1 = norm(dim)
         self.g_self = MultiheadSelfAttention(dim, num_heads, attn_drop=attn_drop, proj_drop=drop)
         self.g_norm2 = norm(dim)
         self.g_xattn = MultiheadCrossAttention(dim, num_heads, attn_drop=attn_drop, proj_drop=drop)
         self.g_norm3 = norm(dim)
-        self.g_moe = TopKMoEMLP(
-            dim,
-            num_experts=num_experts,
-            top_k=moe_top_k,
-            mlp_ratio=moe_mlp_ratio,
-            drop=drop,
-        )
+        if self.use_global_moe:
+            self.g_ffn = TopKMoEMLP(
+                dim,
+                num_experts=num_experts,
+                top_k=moe_top_k_global,
+                mlp_ratio=moe_mlp_ratio,
+                drop=drop,
+                router_jitter=router_jitter,
+                router_temperature=router_temperature,
+            )
+        else:
+            self.g_ffn = MLP(dim, mlp_ratio=moe_mlp_ratio, drop=drop)
 
         self.d_norm1 = norm(dim)
         self.d_self = MultiheadSelfAttention(dim, num_heads, attn_drop=attn_drop, proj_drop=drop)
@@ -290,15 +324,17 @@ class BiRefineMoEDecoderBlock(nn.Module):
         self.d_moe = TopKMoEMLP(
             dim,
             num_experts=num_experts,
-            top_k=moe_top_k,
+            top_k=moe_top_k_detail,
             mlp_ratio=moe_mlp_ratio,
             drop=drop,
+            router_jitter=router_jitter,
+            router_temperature=router_temperature,
         )
 
     def forward(self, xg: torch.Tensor, xd: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         xg = xg + self.g_self(self.g_norm1(xg))
         xg = xg + self.g_xattn(self.g_norm2(xg), ctx=xd)
-        xg = xg + self.g_moe(self.g_norm3(xg))
+        xg = xg + self.g_ffn(self.g_norm3(xg))
 
         xd = xd + self.d_self(self.d_norm1(xd))
         xd = xd + self.d_xattn(self.d_norm2(xd), ctx=xg)
@@ -324,10 +360,10 @@ class PatchEmbed(nn.Module):
 
 class InterpCanvasProjector(nn.Module):
     """
-    Resize to a 512x512 canvas, then a small trainable stem at 512.
+    Apply a small trainable stem at native resolution.
 
     Returns:
-      - x_512: (B, stem_ch, 512, 512) for ViT patch embedding
+      - x_stem: (B, stem_ch, H, W) for ViT patch embedding
       - feat_mid: (B, stem_ch, H/2, W/2) aligned with the original input resolution
     """
     def __init__(self, in_chans: int, stem_ch: int = 64) -> None:
@@ -342,30 +378,19 @@ class InterpCanvasProjector(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        bsz, ch, h, w = x.shape
-        if not (h == w == 512 or h == w == 1024):
-            raise ValueError(f"Only 512x512 or 1024x1024 supported, got {h}x{w}.")
+        _, _, h, w = x.shape
+        if h != w or h % 32 != 0 or h < 32:
+            raise ValueError(f"Expected square input with side divisible by 32, got {h}x{w}.")
 
-        # Intermediates: allowed to resize non-trainably
-        x_512_img = F.interpolate(x, size=(512, 512), mode="bilinear", align_corners=False)
-
-        x_512 = self.stem(x_512_img)  # (B, stem_ch, 512, 512)
-
-        # Need feat_mid at (H/2, W/2)
-        mid_hw = (h // 2, w // 2)
-        if mid_hw == (512, 512):
-            # Input was 1024, mid-res is 512: upsample stem output to mid-res
-            feat_mid = x_512
-        else:
-            # Input was 512, mid-res is 256: downsample stem output
-            feat_mid = F.interpolate(x_512, size=mid_hw, mode="bilinear", align_corners=False)
-
-        return x_512, feat_mid
+        x_stem = self.stem(x)  # (B, stem_ch, H, W)
+        feat_mid = F.avg_pool2d(x_stem, kernel_size=2, stride=2)  # (B, stem_ch, H/2, W/2)
+        return x_stem, feat_mid
 
 
 class MidResRefineHead(nn.Module):
     """
-    Token logits are refined at H/2 using aligned conv features, then a trainable final upsample produces H×W logits.
+    Token features are refined at H/2 and fused with a lightweight full-resolution
+    skip before the final logits layer.
     """
     def __init__(
         self,
@@ -375,6 +400,7 @@ class MidResRefineHead(nn.Module):
         mid_feat_ch: int = 64,
         fuse_ch: int = 128,
         refine_blocks: int = 2,
+        skip_in_ch: int = 3,
     ) -> None:
         super().__init__()
         self.patch_grid = patch_grid
@@ -401,13 +427,35 @@ class MidResRefineHead(nn.Module):
             nn.BatchNorm2d(fuse_ch),
             nn.GELU(),
         )
+        self.full_skip = nn.Sequential(
+            nn.Conv2d(skip_in_ch, skip_in_ch, kernel_size=3, padding=1, groups=skip_in_ch, bias=False),
+            nn.BatchNorm2d(skip_in_ch),
+            nn.GELU(),
+            nn.Conv2d(skip_in_ch, fuse_ch, kernel_size=1, bias=False),
+            nn.BatchNorm2d(fuse_ch),
+            nn.GELU(),
+        )
+        self.full_refine = nn.Sequential(
+            nn.Conv2d(fuse_ch, fuse_ch, kernel_size=3, padding=1, groups=fuse_ch, bias=False),
+            nn.BatchNorm2d(fuse_ch),
+            nn.GELU(),
+            nn.Conv2d(fuse_ch, fuse_ch, kernel_size=1, bias=False),
+            nn.BatchNorm2d(fuse_ch),
+            nn.GELU(),
+        )
         self.out = nn.Conv2d(fuse_ch, num_classes, kernel_size=1, bias=True)
 
-    def forward(self, x_tokens: torch.Tensor, feat_mid: torch.Tensor, out_hw: Tuple[int, int]) -> torch.Tensor:
+    def forward(
+        self,
+        x_tokens: torch.Tensor,
+        feat_mid: torch.Tensor,
+        x_skip_full: torch.Tensor,
+        out_hw: Tuple[int, int],
+    ) -> torch.Tensor:
         bsz, n, _ = x_tokens.shape
-        grid = self.patch_grid
-        if n != grid * grid:
-            raise ValueError(f"Expected {grid*grid} tokens, got {n}.")
+        grid = int(n ** 0.5)
+        if grid * grid != n:
+            raise ValueError(f"Expected square token grid, got {n} tokens.")
 
         h, w = out_hw
         if h % 2 != 0 or w % 2 != 0:
@@ -429,7 +477,33 @@ class MidResRefineHead(nn.Module):
 
         # Final trainable resize to full res and output logits
         x = self.final_up2(x)
+        x = x + self.full_skip(x_skip_full)
+        x = self.full_refine(x)
         return self.out(x)
+
+
+class FullResLogitRefine(nn.Module):
+    """
+    Lightweight full-resolution refinement for boundary detail recovery.
+    Operates on coarse logits + full-resolution image features with minimal cost.
+    """
+    def __init__(self, num_classes: int, skip_in_ch: int = 3, hidden_ch: int = 16) -> None:
+        super().__init__()
+        in_ch = int(num_classes + skip_in_ch)
+        self.pre = nn.Sequential(
+            nn.Conv2d(in_ch, hidden_ch, kernel_size=1, bias=False),
+            nn.BatchNorm2d(hidden_ch),
+            nn.GELU(),
+            nn.Conv2d(hidden_ch, hidden_ch, kernel_size=3, padding=1, groups=hidden_ch, bias=False),
+            nn.BatchNorm2d(hidden_ch),
+            nn.GELU(),
+        )
+        self.out = nn.Conv2d(hidden_ch, num_classes, kernel_size=1, bias=True)
+
+    def forward(self, coarse_logits: torch.Tensor, x_skip_full: torch.Tensor) -> torch.Tensor:
+        x = torch.cat([coarse_logits, x_skip_full], dim=1)
+        delta = self.out(self.pre(x))
+        return coarse_logits + delta
 
 
 class TokenToLogitsFinalTrainableUpsample(nn.Module):
@@ -459,9 +533,9 @@ class TokenToLogitsFinalTrainableUpsample(nn.Module):
 
     def forward(self, x_tokens: torch.Tensor, out_hw: Tuple[int, int]) -> torch.Tensor:
         bsz, n, _ = x_tokens.shape
-        grid = self.patch_grid
-        if n != grid * grid:
-            raise ValueError(f"Expected {grid*grid} tokens, got {n}.")
+        grid = int(n ** 0.5)
+        if grid * grid != n:
+            raise ValueError(f"Expected square token grid, got {n} tokens.")
 
         h, w = out_hw
         if h % 2 != 0 or w % 2 != 0:
@@ -490,17 +564,22 @@ class ViTEncoder(nn.Module):
         mlp_ratio: float,
         drop: float,
         attn_drop: float,
+        input_size: int = 1024,
         use_abs_pos: bool = True,
         use_rmsnorm: bool = True,
         grad_checkpointing: bool = True,
     ) -> None:
         super().__init__()
         self.patch = PatchEmbed(in_chans, embed_dim, patch_size=patch_size)
+        self.patch_size = patch_size
         self.use_abs_pos = use_abs_pos
         self.grad_checkpointing = grad_checkpointing
 
-        # 512 / patch_size tokens per side
-        tokens_side = 512 // patch_size
+        if input_size % patch_size != 0:
+            raise ValueError(f"input_size ({input_size}) must be divisible by patch_size ({patch_size}).")
+
+        # Base positional grid (resized at runtime when needed).
+        tokens_side = input_size // patch_size
         n_tokens = tokens_side * tokens_side
 
         if use_abs_pos:
@@ -523,10 +602,29 @@ class ViTEncoder(nn.Module):
         ])
         self.norm = (RMSNorm(embed_dim) if use_rmsnorm else nn.LayerNorm(embed_dim))
 
-    def forward(self, x_512: torch.Tensor) -> torch.Tensor:
-        x = self.patch(x_512)  # (B, N, D)
+    def _resize_abs_pos(self, n_tokens: int) -> torch.Tensor:
+        if self.pos is None:
+            raise RuntimeError("Absolute positional embeddings are disabled.")
+
+        base_tokens = self.pos.shape[1]
+        if n_tokens == base_tokens:
+            return self.pos
+
+        base_side = int(base_tokens ** 0.5)
+        side = int(n_tokens ** 0.5)
+        if base_side * base_side != base_tokens:
+            raise ValueError(f"Base positional tokens must form a square, got {base_tokens}.")
+        if side * side != n_tokens:
+            raise ValueError(f"Input token count must form a square, got {n_tokens}.")
+
+        pos_2d = self.pos.view(1, base_side, base_side, -1).permute(0, 3, 1, 2).contiguous()
+        pos_2d = F.interpolate(pos_2d, size=(side, side), mode="bicubic", align_corners=False)
+        return pos_2d.permute(0, 2, 3, 1).reshape(1, n_tokens, -1).contiguous()
+
+    def forward(self, x_img: torch.Tensor) -> torch.Tensor:
+        x = self.patch(x_img)  # (B, N, D)
         if self.pos is not None:
-            x = x + self.pos
+            x = x + self._resize_abs_pos(x.shape[1])
         x = self.drop(x)
 
         for blk in self.blocks:
@@ -540,81 +638,53 @@ class ViTEncoder(nn.Module):
 
 class DetailTokenExtractor(nn.Module):
     """
-    Extract "detail tokens" from high-res features, but match the same token grid as the ViT.
-    No interpolation: use strided convs to reach 32x32 when input is 1024, and 32x32 when input is 512.
+    Extract detail tokens from mid-resolution features and project to
+    the same token grid size as the ViT encoder stream.
     """
     def __init__(self, in_chans: int, out_dim: int, patch_size: int) -> None:
         super().__init__()
-        # Target token grid = 512/patch_size = 32 for patch_size=16.
         self.patch_size = patch_size
-        self.to_tokens_512 = nn.Sequential(
-            nn.Conv2d(in_chans, out_dim, kernel_size=3, stride=2, padding=1, bias=False),  # 512->256
+        self.pre = nn.Sequential(
+            nn.Conv2d(in_chans, out_dim, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(out_dim),
             nn.GELU(),
-            nn.Conv2d(out_dim, out_dim, kernel_size=3, stride=2, padding=1, bias=False),  # 256->128
-            nn.BatchNorm2d(out_dim),
-            nn.GELU(),
-            nn.Conv2d(out_dim, out_dim, kernel_size=3, stride=2, padding=1, bias=False),  # 128->64
-            nn.BatchNorm2d(out_dim),
-            nn.GELU(),
-            nn.Conv2d(out_dim, out_dim, kernel_size=3, stride=2, padding=1, bias=False),  # 64->32
-            nn.BatchNorm2d(out_dim),
-            nn.GELU(),
-        )
-        self.to_tokens_1024 = nn.Sequential(
-            nn.Conv2d(in_chans, out_dim, kernel_size=3, stride=2, padding=1, bias=False),  # 1024->512
-            nn.BatchNorm2d(out_dim),
-            nn.GELU(),
-            nn.Conv2d(out_dim, out_dim, kernel_size=3, stride=2, padding=1, bias=False),  # 512->256
-            nn.BatchNorm2d(out_dim),
-            nn.GELU(),
-            nn.Conv2d(out_dim, out_dim, kernel_size=3, stride=2, padding=1, bias=False),  # 256->128
-            nn.BatchNorm2d(out_dim),
-            nn.GELU(),
-            nn.Conv2d(out_dim, out_dim, kernel_size=3, stride=2, padding=1, bias=False),  # 128->64
-            nn.BatchNorm2d(out_dim),
-            nn.GELU(),
-            nn.Conv2d(out_dim, out_dim, kernel_size=3, stride=2, padding=1, bias=False),  # 64->32
+            nn.Conv2d(out_dim, out_dim, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(out_dim),
             nn.GELU(),
         )
 
-    def forward(self, feat_hi: torch.Tensor) -> torch.Tensor:
-        h, w = feat_hi.shape[-2:]
-        if (h, w) == (512, 512):
-            x = self.to_tokens_512(feat_hi)
-        elif (h, w) == (1024, 1024):
-            x = self.to_tokens_1024(feat_hi)
-        else:
-            raise ValueError(f"Only 512x512 or 1024x1024 supported, got {h}x{w}.")
-
-        bsz, dim, ht, wt = x.shape  # ht=wt=32
+    def forward(self, feat_hi: torch.Tensor, token_side: int) -> torch.Tensor:
+        if token_side < 1:
+            raise ValueError(f"token_side must be >= 1, got {token_side}.")
+        x = self.pre(feat_hi)
+        x = F.adaptive_avg_pool2d(x, output_size=(token_side, token_side))
         x = x.flatten(2).transpose(1, 2)  # (B, N, D)
         return x
 
 
 class InputSkipTokenProjector(nn.Module):
     """
-    Direct skip path from normalized input to decoder token space.
-    Uses a fixed 1024 canvas, then pools to token grid to keep compute low.
+    Lightweight shortcut from stem features to decoder token space.
+    This preserves a direct path from the shallow convolutional features
+    without reusing the deeper strided detail extractor.
     """
-    def __init__(self, in_chans: int, out_dim: int, token_grid: int = 32) -> None:
+    def __init__(self, in_chans: int, out_dim: int, token_grid: int = 32, hidden_ch: int = 64) -> None:
         super().__init__()
         self.token_grid = token_grid
-        self.proj = nn.Conv2d(in_chans, out_dim, kernel_size=1, stride=1, padding=0, bias=True)
+        self.pre = nn.Sequential(
+            nn.Conv2d(in_chans, in_chans, kernel_size=3, stride=1, padding=1, groups=in_chans, bias=False),
+            nn.BatchNorm2d(in_chans),
+            nn.GELU(),
+            nn.Conv2d(in_chans, hidden_ch, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(hidden_ch),
+            nn.GELU(),
+        )
+        self.proj = nn.Conv2d(hidden_ch, out_dim, kernel_size=1, stride=1, padding=0, bias=True)
 
-    def forward(self, x_norm: torch.Tensor) -> torch.Tensor:
-        h, w = x_norm.shape[-2:]
-        if (h, w) == (1024, 1024):
-            x_1024 = x_norm
-        elif (h, w) == (512, 512):
-            x_1024 = F.interpolate(x_norm, size=(1024, 1024), mode="bilinear", align_corners=False)
-        else:
-            raise ValueError(f"Only 512x512 or 1024x1024 supported, got {h}x{w}.")
-
-        x = F.adaptive_avg_pool2d(x_1024, output_size=(self.token_grid, self.token_grid))
+    def forward(self, feat_mid: torch.Tensor) -> torch.Tensor:
+        x = self.pre(feat_mid)
+        x = F.adaptive_avg_pool2d(x, output_size=(self.token_grid, self.token_grid))
         x = self.proj(x)
-        bsz, dim, ht, wt = x.shape
         x = x.flatten(2).transpose(1, 2).contiguous()
         return x
 
@@ -631,10 +701,14 @@ class TransformerDecoder(nn.Module):
         attn_drop: float,
         moe_depth: int,
         num_experts: int,
-        moe_top_k: int = 2,
+        moe_top_k_global: int = 2,
+        moe_top_k_detail: int = 1,
         moe_mlp_ratio: float = 1.75,
         use_rmsnorm: bool = True,
         grad_checkpointing: bool = False,
+        router_jitter: float = 0.0,
+        router_temperature: float = 1.0,
+        use_global_moe: bool = False,
     ) -> None:
         super().__init__()
         if moe_depth < 0:
@@ -666,11 +740,15 @@ class TransformerDecoder(nn.Module):
                 dim=dec_dim,
                 num_heads=num_heads,
                 num_experts=num_experts,
-                moe_top_k=moe_top_k,
+                moe_top_k_global=moe_top_k_global,
+                moe_top_k_detail=moe_top_k_detail,
                 moe_mlp_ratio=moe_mlp_ratio,
                 drop=drop,
                 attn_drop=attn_drop,
                 use_rmsnorm=use_rmsnorm,
+                router_jitter=router_jitter,
+                router_temperature=router_temperature,
+                use_global_moe=use_global_moe,
             )
             for _ in range(sparse_depth)
         ])
@@ -689,9 +767,9 @@ class TransformerDecoder(nn.Module):
         self.blocks = nn.ModuleList(blocks)
         self.norm = (RMSNorm(dec_dim) if use_rmsnorm else nn.LayerNorm(dec_dim))
 
-    def forward(self, x_enc: torch.Tensor, x_detail: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_enc: torch.Tensor, x_detail: torch.Tensor | None = None) -> torch.Tensor:
         xg = self.enc_to_dec(x_enc)
-        xd = x_detail
+        xd = xg if x_detail is None else x_detail
 
         for blk in self.blocks:
             if self.grad_checkpointing and self.training:
@@ -709,24 +787,37 @@ class SkinSegFormerConfig:
     num_classes: int = 1
 
     # Internal canvas size is fixed by design at 512.
-    patch_size: int = 16  # 512/16 = 32 tokens/side
+    patch_size: int = 32  # 512/16 = 32 tokens/side
 
     # Encoder (ViT-like)
     enc_dim: int = 384
     enc_depth: int = 12
     enc_heads: int = 6
     enc_mlp_ratio: float = 4.0
+    # Cap encoder input side to control quadratic ViT attention cost.
+    # 1024 input with cap=512 keeps encoder compute near the previous budget.
+    enc_max_side: int = 1024
+    # Cap overall internal compute side; logits are upsampled back to input size.
+    # Set <=0 to disable.
+    max_compute_side: int = 1024
+    # Optional lightweight full-resolution refinement after upsampling logits.
+    use_fullres_refine: bool = True
+    fullres_refine_ch: int = 64
 
     # Decoder (transformer-based)
     dec_dim: int = 256
     dec_depth: int = 6
     # The MoE depth is at most dec_depth - 2, as the MoE blocks are wrapped in dense layers.
-    dec_moe_depth: int = 4
+    dec_moe_depth: int = 0
     dec_heads: int = 8
     dec_mlp_ratio: float = 4.0
     dec_num_experts: int = 8
-    dec_moe_top_k: int = 2
+    dec_moe_top_k_global: int = 2
+    dec_moe_top_k_detail: int = 1
     dec_moe_mlp_ratio: float = 1.75
+    dec_moe_router_jitter: float = 0.01
+    dec_moe_router_temperature: float = 0.75
+    dec_moe_use_global: bool = False
 
     drop: float = 0.05
     attn_drop: float = 0.01
@@ -738,7 +829,7 @@ class SkinSegFormerConfig:
 
 class SkinSegFormer(nn.Module):
     """
-    Trainable 512-canvas ViT encoder + BiRefine transformer decoder + trainable upsample head.
+    Native-resolution stem + compute-capped ViT encoder + transformer decoder + lightweight upsample head.
     """
     def __init__(self, cfg: SkinSegFormerConfig) -> None:
         super().__init__()
@@ -750,9 +841,9 @@ class SkinSegFormer(nn.Module):
         self.register_buffer("std", std_t)
 
         self.canvas = InterpCanvasProjector(cfg.in_chans, stem_ch=64)
-        token_grid = 512 // cfg.patch_size
+        token_grid = 1024 // cfg.patch_size
 
-        # ViT runs on the 512x512 canvas features (64 channels).
+        # ViT runs on native-resolution stem features (64 channels).
         self.encoder = ViTEncoder(
             in_chans=64,
             embed_dim=cfg.enc_dim,
@@ -762,19 +853,14 @@ class SkinSegFormer(nn.Module):
             mlp_ratio=cfg.enc_mlp_ratio,
             drop=cfg.drop,
             attn_drop=cfg.attn_drop,
+            input_size=1024,
             use_abs_pos=cfg.use_abs_pos,
             use_rmsnorm=cfg.use_rmsnorm,
             grad_checkpointing=cfg.grad_checkpointing,
         )
 
         # Detail tokens come from high-res stem features (64 channels) to match token grid.
-        self.detail = DetailTokenExtractor(in_chans=64, out_dim=cfg.dec_dim, patch_size=cfg.patch_size)
-        self.input_skip = InputSkipTokenProjector(
-            in_chans=cfg.in_chans,
-            out_dim=cfg.dec_dim,
-            token_grid=token_grid,
-        )
-        self.detail_fuse_norm = (RMSNorm(cfg.dec_dim) if cfg.use_rmsnorm else nn.LayerNorm(cfg.dec_dim))
+        self.detail = None
 
         self.decoder = TransformerDecoder(
             enc_dim=cfg.enc_dim,
@@ -786,39 +872,93 @@ class SkinSegFormer(nn.Module):
             attn_drop=cfg.attn_drop,
             moe_depth=cfg.dec_moe_depth,
             num_experts=cfg.dec_num_experts,
-            moe_top_k=cfg.dec_moe_top_k,
+            moe_top_k_global=cfg.dec_moe_top_k_global,
+            moe_top_k_detail=cfg.dec_moe_top_k_detail,
             moe_mlp_ratio=cfg.dec_moe_mlp_ratio,
             use_rmsnorm=cfg.use_rmsnorm,
             grad_checkpointing=cfg.grad_checkpointing,
+            router_jitter=cfg.dec_moe_router_jitter,
+            router_temperature=cfg.dec_moe_router_temperature,
+            use_global_moe=cfg.dec_moe_use_global,
         )
 
-        self.head = MidResRefineHead(
+        self.head = TokenToLogitsFinalTrainableUpsample(
             dec_dim=cfg.dec_dim,
             num_classes=cfg.num_classes,
             patch_grid=token_grid,
-            mid_feat_ch=64,
-            fuse_ch=128,
-            refine_blocks=2,
+            mid_ch=96,
+        )
+        self.fullres_refine = (
+            FullResLogitRefine(
+                num_classes=cfg.num_classes,
+                skip_in_ch=cfg.in_chans,
+                hidden_ch=cfg.fullres_refine_ch,
+            )
+            if cfg.use_fullres_refine else None
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        :param x: Input image tensor (B, C, H, W), H/W in {512, 1024}.
+        :param x: Input image tensor (B, C, H, W), square and divisible by 32.
         :returns: Logits (B, num_classes, H, W).
         """
-        bsz, ch, h, w = x.shape
-        if not (h == w == 512 or h == w == 1024):
-            raise ValueError(f"Only 512x512 or 1024x1024 supported, got {h}x{w}.")
+        _, _, h, w = x.shape
+        if h != w or h % 32 != 0 or h < 32:
+            raise ValueError(f"Expected square input with side divisible by 32, got {h}x{w}.")
+        orig_hw = (h, w)
 
-        x_norm = (x - self.mean) / self.std
-        x_512, feat_mid = self.canvas(x_norm)
-        x_enc = self.encoder(x_512)
-        x_detail = self.detail(feat_mid)
-        x_skip = self.input_skip(x_norm)
-        x_detail = self.detail_fuse_norm(x_detail + x_skip)
-        x_dec = self.decoder(x_enc, x_detail)
-        logits = self.head(x_dec, feat_mid, out_hw=(h, w))
+        x_model = x
+        if self.cfg.max_compute_side > 0 and h > self.cfg.max_compute_side:
+            side = self.cfg.max_compute_side
+            if side % 32 != 0:
+                raise ValueError(f"max_compute_side must be divisible by 32, got {side}.")
+            x_model = F.interpolate(x, size=(side, side), mode="bilinear", align_corners=False)
+        model_h, model_w = x_model.shape[-2:]
+
+        x_norm = (x_model - self.mean) / self.std
+        x_stem, _ = self.canvas(x_norm)
+        x_enc_in = x_stem
+        if self.cfg.enc_max_side > 0 and model_h > self.cfg.enc_max_side:
+            x_enc_in = F.interpolate(
+                x_stem,
+                size=(self.cfg.enc_max_side, self.cfg.enc_max_side),
+                mode="bilinear",
+                align_corners=False,
+            )
+        x_enc = self.encoder(x_enc_in)
+        x_dec = self.decoder(x_enc, x_detail=None)
+        logits = self.head(x_dec, out_hw=(model_h, model_w))
+        if (model_h, model_w) != orig_hw:
+            logits = F.interpolate(logits, size=orig_hw, mode="bilinear", align_corners=False)
+        if self.fullres_refine is not None:
+            x_norm_full = (x - self.mean) / self.std
+            logits = self.fullres_refine(logits, x_skip_full=x_norm_full)
         return logits
+
+    def get_moe_metrics(self) -> dict[str, torch.Tensor | None]:
+        aux_losses = []
+        importance = []
+        load = []
+        entropy = []
+        for module in self.modules():
+            if isinstance(module, TopKMoEMLP) and module.last_aux_loss is not None:
+                aux_losses.append(module.last_aux_loss)
+                if module.last_importance is not None:
+                    importance.append(module.last_importance)
+                if module.last_load is not None:
+                    load.append(module.last_load)
+                if module.last_entropy is not None:
+                    entropy.append(module.last_entropy)
+
+        if not aux_losses:
+            return {"aux_loss": None, "importance": None, "load": None, "entropy": None}
+
+        return {
+            "aux_loss": torch.stack(aux_losses).mean(),
+            "importance": torch.stack(importance).mean(dim=0) if importance else None,
+            "load": torch.stack(load).mean(dim=0) if load else None,
+            "entropy": torch.stack(entropy).mean() if entropy else None,
+        }
 
 
 def count_parameters(model: nn.Module) -> int:

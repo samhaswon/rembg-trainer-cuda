@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from model.flop_counter import count_flops_forward
 
 
 class REBNConv(nn.Module):
@@ -149,12 +150,11 @@ if __name__ == "__main__":
     y = model(x)
     print("out:", y.shape, f"\tparams: {sum(p.numel() for p in model.parameters()) :,}")
 
-    from fvcore.nn import FlopCountAnalysis
     import time
 
     test_tensor = torch.rand(1, 3, TEST_DIM, TEST_DIM)
-    flops = FlopCountAnalysis(model, (test_tensor,))
-    print(f"{flops.total() = :,}")
+    flops = count_flops_forward(model, test_tensor)
+    print(f"{flops = :,}")
 
     start = time.perf_counter()
     for _ in range(10):

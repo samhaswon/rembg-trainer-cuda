@@ -231,13 +231,19 @@ class Collator:
 
 class BCEPlusDice(nn.Module):
     """
-    BCE + soft Dice for alpha-like masks.
+    BCE + soft Dice + Sobel edge loss for alpha-like masks.
     """
 
-    def __init__(self, bce_weight: float = 0.5, dice_weight: float = 0.5) -> None:
+    def __init__(
+        self,
+        bce_weight: float = 0.5,
+        dice_weight: float = 0.5,
+        edge_weight: float = 0.0,
+    ) -> None:
         super().__init__()
         self.bce_weight = bce_weight
         self.dice_weight = dice_weight
+        self.edge_weight = max(0.0, float(edge_weight))
         self.bce = nn.BCEWithLogitsLoss()
 
     @staticmethod
@@ -247,14 +253,37 @@ class BCEPlusDice(nn.Module):
         den = pred.pow(2).sum(dim=(1, 2, 3)) + target.pow(2).sum(dim=(1, 2, 3)) + eps
         return 1.0 - (num / den)
 
+    @staticmethod
+    def sobel_edge_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+        sobel_x = pred.new_tensor(
+            [[[-1.0, 0.0, 1.0],
+              [-2.0, 0.0, 2.0],
+              [-1.0, 0.0, 1.0]]]
+        ).unsqueeze(0)  # (1,1,3,3)
+        sobel_y = pred.new_tensor(
+            [[[-1.0, -2.0, -1.0],
+              [0.0, 0.0, 0.0],
+              [1.0, 2.0, 1.0]]]
+        ).unsqueeze(0)  # (1,1,3,3)
+
+        pred_gx = F.conv2d(pred, sobel_x, padding=1)
+        pred_gy = F.conv2d(pred, sobel_y, padding=1)
+        tgt_gx = F.conv2d(target, sobel_x, padding=1)
+        tgt_gy = F.conv2d(target, sobel_y, padding=1)
+
+        pred_mag = torch.sqrt(pred_gx.pow(2) + pred_gy.pow(2) + eps)
+        tgt_mag = torch.sqrt(tgt_gx.pow(2) + tgt_gy.pow(2) + eps)
+        return (pred_mag - tgt_mag).abs().mean()
+
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         # Model may output logits already in 0..1 or raw; be safe
         if logits.shape[1] != 1:
             raise ValueError("Expecting single-channel output.")
         pred = torch.sigmoid(logits) if (logits.min() < 0 or logits.max() > 1) else logits
-        bce = self.bce(pred, target)
+        bce = self.bce(logits, target)
         dice = self.dice_loss(pred, target).mean()
-        return self.bce_weight * bce + self.dice_weight * dice
+        edge = self.sobel_edge_loss(pred, target) if self.edge_weight > 0.0 else pred.new_zeros(())
+        return self.bce_weight * bce + self.dice_weight * dice + self.edge_weight * edge
 
 
 def split_pairs(pairs: List[Tuple[Path, Path]], eval_size: int, seed: int) -> Tuple[List, List]:
@@ -390,11 +419,15 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--num_train_epochs", type=int, default=100)
     ap.add_argument("--learning_rate", type=float, default=5e-5)
     ap.add_argument("--fp16", type=lambda x: x.lower() != "false", default=False)
+    ap.add_argument("--moe_aux_weight", type=float, default=1e-5)
+    ap.add_argument("--moe_aux_warmup_epochs", type=int, default=0)
+    ap.add_argument("--moe_aux_final_ratio", type=float, default=0.0)
+    ap.add_argument("--edge_weight", type=float, default=0.1)
     return ap.parse_args()
 
 
 def main() -> None:
-    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.benchmark = False
     args = parse_args()
     torch.manual_seed(args.seed)
     torch.multiprocessing.set_start_method("fork")
@@ -413,8 +446,9 @@ def main() -> None:
         ),
         batch_size=args.per_device_train_batch_size,
         shuffle=True,
-        pin_memory=False,
-        num_workers=8,
+        pin_memory=True,
+        persistent_workers=False,
+        num_workers=16,
     )
     eval_ds = DataLoader(
         FolderSegDataset(
@@ -425,8 +459,9 @@ def main() -> None:
         ),
         batch_size=args.per_device_eval_batch_size,
         shuffle=False,
-        pin_memory=False,
-        num_workers=8,
+        pin_memory=True,
+        persistent_workers=False,
+        num_workers=16,
     )
 
     cfg = SkinSegFormerConfig(
@@ -446,37 +481,108 @@ def main() -> None:
         eps=1e-08,
         weight_decay=1E-5,
     )
-    epochs_done = load_checkpoint(model, optimizer, filename="saved_models/checkpoint.pth.tar")
+    epochs_done = load_checkpoint(model, optimizer, filename="saved_models/checkpoint_30.pth.tar")
     epochs_left = args.num_train_epochs - epochs_done
-    scheduler = CosineAnnealingLR(optimizer, T_max=epochs_left, eta_min=1e-6)
-    criterion = BCEPlusDice(bce_weight=0.33, dice_weight=0.67)
+    total_train_steps = max(1, epochs_left * len(train_ds))
+    scheduler = CosineAnnealingLR(optimizer, T_max=total_train_steps, eta_min=1e-6)
+    criterion = BCEPlusDice(bce_weight=0.33, dice_weight=0.67, edge_weight=args.edge_weight)
     use_fp16 = args.fp16
+    scaler = torch.amp.GradScaler("cuda", enabled=use_fp16)
 
-    device = "cuda:1"
+    if use_fp16:
+        torch.set_float32_matmul_precision('medium')
+        torch.backends.cuda.matmul.allow_tf32 = True
+
+    device = "cuda:0"
     model.to(device)
+    if use_fp16:
+        model.compile()
+
+    warmup_epochs = max(0, args.moe_aux_warmup_epochs)
+    final_ratio = min(1.0, max(0.0, args.moe_aux_final_ratio))
+    total_epochs = max(1, epochs_left)
+
+    def moe_aux_weight_for_epoch(epoch_idx: int) -> float:
+        if epoch_idx < warmup_epochs:
+            return args.moe_aux_weight
+        decay_steps = max(1, (total_epochs // 8) - warmup_epochs)
+        t = min(1.0, float(epoch_idx - warmup_epochs) / float(decay_steps))
+        return args.moe_aux_weight * (1.0 - t * (1.0 - final_ratio))
 
     for i in range(epochs_left):
         model.train()
         train_progress_bar = tqdm(total=len(train_ds), desc=f"Training [{i + 1}/{epochs_left}]")
+        curr_moe_aux_weight = moe_aux_weight_for_epoch(i)
+        train_seg_loss = 0.0
+        train_total_loss = 0.0
+        train_moe_aux = 0.0
+        train_moe_entropy = 0.0
+        train_moe_load = None
+        train_moe_importance = None
+        train_num_samples = 0
         for data in train_ds:
             # inputs = data["pixel_values"]
             inputs = data["pixel_values"].to(device, non_blocking=True)
             # labels = data["labels"].to("cuda:1", non_blocking=True)
             labels = data["labels"].to(device, non_blocking=True)
+            batch_size = int(inputs.shape[0])
 
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_fp16):
                 outputs = model(inputs)
-            logits = _extract_logits(outputs)
-
-            loss = criterion(logits, labels)
-            loss.backward()
-            train_progress_bar.set_postfix({"loss": loss.item()})
-            optimizer.step()
+                logits = _extract_logits(outputs)
+                seg_loss = criterion(logits, labels)
+            moe_metrics = model.get_moe_metrics()
+            moe_aux_loss = moe_metrics["aux_loss"]
+            if moe_aux_loss is None:
+                moe_aux_loss = seg_loss.new_zeros(())
+            loss = seg_loss + curr_moe_aux_weight * moe_aux_loss
+            scaler.scale(loss).backward()
+            train_seg_loss += seg_loss.item() * batch_size
+            train_total_loss += loss.item() * batch_size
+            train_moe_aux += moe_aux_loss.detach().item() * batch_size
+            if moe_metrics["entropy"] is not None:
+                train_moe_entropy += moe_metrics["entropy"].item() * batch_size
+            if moe_metrics["load"] is not None:
+                batch_load = moe_metrics["load"].detach().cpu()
+                batch_load = batch_load * batch_size
+                train_moe_load = batch_load if train_moe_load is None else train_moe_load + batch_load
+            if moe_metrics["importance"] is not None:
+                batch_importance = moe_metrics["importance"].detach().cpu()
+                batch_importance = batch_importance * batch_size
+                train_moe_importance = (
+                    batch_importance if train_moe_importance is None else train_moe_importance + batch_importance
+                )
+            train_num_samples += batch_size
+            train_progress_bar.set_postfix(
+                {"loss": loss.item(), "seg": seg_loss.item(), "moe": moe_aux_loss.detach().item()}
+            )
+            scaler.step(optimizer)
+            scaler.update()
 
             scheduler.step()
             train_progress_bar.update(1)
         train_progress_bar.close()
+        train_denom = max(1, train_num_samples)
+        mean_train_total = train_total_loss / train_denom
+        mean_train_seg = train_seg_loss / train_denom
+        mean_train_moe_aux = train_moe_aux / train_denom
+        mean_train_moe_entropy = train_moe_entropy / train_denom
+        moe_load_msg = ""
+        if train_moe_load is not None:
+            avg_load = (train_moe_load / train_denom).tolist()
+            avg_importance = (train_moe_importance / train_denom).tolist() if train_moe_importance is not None else None
+            load_fmt = ", ".join(f"{v:.3f}" for v in avg_load)
+            moe_load_msg = f" load=[{load_fmt}]"
+            if avg_importance is not None:
+                imp_fmt = ", ".join(f"{v:.3f}" for v in avg_importance)
+                moe_load_msg += f" importance=[{imp_fmt}]"
+        print(
+            f"Epoch {epochs_done + i + 1} train: "
+            f"loss={mean_train_total:.5f} seg={mean_train_seg:.5f} "
+            f"moe_aux={mean_train_moe_aux:.5f} entropy={mean_train_moe_entropy:.5f} "
+            f"moe_w={curr_moe_aux_weight:.5f}{moe_load_msg}"
+        )
         model.eval()
         save_checkpoint(
             {
@@ -488,20 +594,25 @@ def main() -> None:
         )
         eval_progress_bar = tqdm(total=len(eval_ds), desc=f"Evaluating [{i + 1}/{epochs_left}]")
         eval_results = {"mae": 0.0, "iou50": 0.0, "dice": 0.0}
-        for data in eval_ds:
-            inputs = data["pixel_values"].to("cuda:1", non_blocking=True)
-            labels = data["labels"]
-            with torch.inference_mode():
-                outputs = model(inputs)
-            results = compute_seg_metrics(outputs.cpu(), labels)
-            eval_results["mae"] += results["mae"]
-            eval_results["iou50"] += results["iou50"]
-            eval_results["dice"] += results["dice"]
-            eval_progress_bar.update(1)
+        eval_num_samples = 0
+        with torch.inference_mode():
+            for data in eval_ds:
+                inputs = data["pixel_values"].to(device, non_blocking=True)
+                labels = data["labels"]
+                batch_size = int(inputs.shape[0])
+                with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=use_fp16):
+                    outputs = model(inputs)
+                results = compute_seg_metrics(outputs.cpu(), labels)
+                eval_results["mae"] += results["mae"] * batch_size
+                eval_results["iou50"] += results["iou50"] * batch_size
+                eval_results["dice"] += results["dice"] * batch_size
+                eval_num_samples += batch_size
+                eval_progress_bar.update(1)
         eval_progress_bar.close()
-        eval_results["mae"] = eval_results["mae"] / (len(eval_ds) // args.per_device_eval_batch_size)
-        eval_results["iou50"] = eval_results["iou50"] / (len(eval_ds) // args.per_device_eval_batch_size)
-        eval_results["dice"] = eval_results["dice"] / (len(eval_ds) // args.per_device_eval_batch_size)
+        eval_denom = max(1, eval_num_samples)
+        eval_results["mae"] = eval_results["mae"] / eval_denom
+        eval_results["iou50"] = eval_results["iou50"] / eval_denom
+        eval_results["dice"] = eval_results["dice"] / eval_denom
         print(f"Epoch {i + 1 + epochs_done} eval: {eval_results}")
 
 

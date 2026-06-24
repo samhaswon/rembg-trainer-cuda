@@ -13,7 +13,7 @@ from torch import nn
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from torchvision.transforms import transforms
-from torchvision.models.segmentation import deeplabv3_mobilenet_v3_large
+from model import DeepLabV3MobileNetV3
 
 
 from data_loader import (
@@ -82,29 +82,6 @@ train_configs = {
         "batch_factor": 16,  # same here
     },
 }
-
-
-class DeepLabV3MobileNetV3(nn.Module):
-    """
-    DeepLabV3 with MobileNetV3 backbone
-
-    Parameters
-    ----------
-    num_classes : int
-        Output channels. Use 1 for a single foreground/background mask.
-    """
-
-    def __init__(self, num_classes: int = 1) -> None:
-        super().__init__()
-        self.net = deeplabv3_mobilenet_v3_large(
-            weights=None,             # classifier head uninitialized
-            weights_backbone=None,    # backbone uninitialized
-            num_classes=num_classes,  # 1-channel logits
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y = self.net(x)["out"]  # [N, C, H, W], resized to input size
-        return torch.sigmoid(y)
 
 
 def dice_loss(predict, target, smooth=1.0):
