@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from model.flop_counter import count_flops_forward
 
 
 class REBNCONV(nn.Module):
@@ -639,6 +640,10 @@ if __name__ == '__main__':
     # res = net(test_tensor)
     # print(res.shape)
 
-    net = U2NETP(3, 1)
+    net = U2NET(3, 1)
     param_count = sum(p.numel() for p in net.parameters() if p.requires_grad)
     print(f"{param_count=:,}")
+
+    test_tensor = torch.rand(1, 3, 1024, 1024)
+    flops = count_flops_forward(net, test_tensor)
+    print(f"FLOPs: {flops:,}")
